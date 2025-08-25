@@ -5,3 +5,4 @@ src/Scripts/composers_assistant_v2/models_permuted_labels/
 *.DS_Store
 /midigpt_dependencies
 /midigpt_workspace
+/src/Scripts/composers_assistant_v2/temp_midi
