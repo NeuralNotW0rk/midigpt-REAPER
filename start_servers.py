@@ -1,285 +1,223 @@
 #!/usr/bin/env python3
 """
-Lean Server Management Script
-Simplified version for dual server architecture
+Simple Server Management with correct virtual environment targeting
 """
 
-import os
-import sys
 import subprocess
-import time
 import signal
-import platform
+import sys
+import time
+import os
+import socket
 
-# Simple configuration - using absolute paths
-MIDIGPT_VENV = "midigpt_workspace/venv"
-NN_VENV = ".venv"
-MIDIGPT_SCRIPT = "midigpt_server.py"
-NN_SCRIPT = "src/Scripts/composers_assistant_v2/proxy_nn_server.py"
+servers = []
 
-# Global server processes
-servers = {}
-
-def get_python_exe(venv_path):
-    """Get Python executable from venv with absolute path resolution"""
-    # Convert to absolute path to avoid issues when changing working directories
-    abs_venv_path = os.path.abspath(venv_path)
+def find_script(filename):
+    """Find script in current directory or subdirectories"""
+    # Check current directory first
+    if os.path.exists(filename):
+        return filename
     
-    if not os.path.exists(abs_venv_path):
-        print(f"ERROR: Virtual environment not found: {abs_venv_path}")
-        return None
+    # Check common subdirectory patterns
+    possible_paths = [
+        os.path.join('src', 'Scripts', 'composers_assistant_v2', filename),
+        os.path.join('Scripts', 'composers_assistant_v2', filename),
+        os.path.join('composers_assistant_v2', filename),
+    ]
     
-    if platform.system() == "Windows":
-        python_exe = os.path.join(abs_venv_path, "Scripts", "python.exe")
-    else:
-        python_exe = os.path.join(abs_venv_path, "bin", "python")
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
     
-    if os.path.exists(python_exe):
-        try:
-            result = subprocess.run([python_exe, "--version"], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                return python_exe
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-    
-    print(f"ERROR: Python executable not found at: {python_exe}")
     return None
 
-def start_midigpt():
-    """Start midigpt server (Python 3.8)"""
-    print("Starting midigpt server...")
-    
-    python_exe = get_python_exe(MIDIGPT_VENV)
-    if not python_exe:
-        print("ERROR: midigpt venv not found")
-        return False
-    
-    if not os.path.exists(MIDIGPT_SCRIPT):
-        print(f"ERROR: midigpt script not found: {MIDIGPT_SCRIPT}")
-        return False
-    
-    try:
-        # Set PYTHONPATH to include midigpt workspace
-        env = os.environ.copy()
-        midigpt_path = os.path.abspath(os.path.join("midigpt_workspace", "MIDI-GPT", "python_lib"))
-        if os.path.exists(midigpt_path):
-            current_pythonpath = env.get('PYTHONPATH', '')
-            env['PYTHONPATH'] = f"{midigpt_path}:{current_pythonpath}" if current_pythonpath else midigpt_path
+def get_python_executable(server_name):
+    """Get the correct Python executable for each server"""
+    if 'midigpt' in server_name.lower():
+        # Use midigpt workspace virtual environment (Python 3.8)
+        venv_paths = [
+            os.path.join('midigpt_workspace', 'venv', 'bin', 'python'),  # Unix/Mac
+            os.path.join('midigpt_workspace', 'venv', 'Scripts', 'python.exe'),  # Windows
+            os.path.join('midigpt_workspace', 'venv', 'Scripts', 'python'),  # Windows alt
+        ]
         
-        process = subprocess.Popen([python_exe, MIDIGPT_SCRIPT], env=env)
-        servers['midigpt'] = process
-        print(f"midigpt server started (PID: {process.pid})")
-        return True
-    except Exception as e:
-        print(f"ERROR: Failed to start midigpt: {e}")
-        return False
-
-def start_nn():
-    """Start NN proxy server (Python 3.9)"""
-    print("Starting NN proxy server...")
-    
-    python_exe = get_python_exe(NN_VENV)
-    if not python_exe:
-        print("ERROR: NN venv not found")
-        return False
-    
-    if not os.path.exists(NN_SCRIPT):
-        print(f"ERROR: NN script not found: {NN_SCRIPT}")
-        return False
-    
-    try:
-        # Run from the script's directory
-        script_dir = os.path.dirname(NN_SCRIPT)
-        script_name = os.path.basename(NN_SCRIPT)
+        for venv_path in venv_paths:
+            if os.path.exists(venv_path):
+                abs_path = os.path.abspath(venv_path)
+                print(f"Using midigpt venv Python: {abs_path}")
+                return abs_path
         
-        # Use absolute path for python_exe so it works when cwd changes
-        process = subprocess.Popen([python_exe, script_name], cwd=script_dir)
-        servers['nn'] = process
-        print(f"NN proxy server started (PID: {process.pid})")
-        return True
-    except Exception as e:
-        print(f"ERROR: Failed to start NN proxy: {e}")
-        return False
-
-def stop_servers():
-    """Stop all servers"""
-    print("Stopping servers...")
-    
-    for name, process in servers.items():
-        try:
-            process.terminate()
-            process.wait(timeout=5)
-            print(f"Stopped {name} server")
-        except subprocess.TimeoutExpired:
-            process.kill()
-            print(f"Force killed {name} server")
-        except Exception as e:
-            print(f"ERROR: Error stopping {name}: {e}")
-    
-    servers.clear()
-
-def check_health(verbose=False):
-    """Quick health check with better error reporting"""
-    print("Checking server health...")
-    
-    # Check midigpt
-    try:
-        import requests
-        response = requests.get('http://127.0.0.1:3457/health', timeout=2)
-        if response.status_code == 200:
-            print("midigpt server: healthy")
-        else:
-            print(f"midigpt server: status {response.status_code}")
-            if verbose:
-                print(f"  Response: {response.text[:200]}")
-    except requests.exceptions.ConnectionError as e:
-        print("midigpt server: connection refused")
-        if verbose:
-            print(f"  Details: {e}")
-    except requests.exceptions.Timeout as e:
-        print("midigpt server: timeout")
-        if verbose:
-            print(f"  Details: {e}")
-    except Exception as e:
-        print(f"midigpt server: error - {type(e).__name__}: {e}")
-    
-    # Check NN proxy
-    try:
-        import xmlrpc.client
-        proxy = xmlrpc.client.ServerProxy('http://127.0.0.1:3456')
-        # Test with both required arguments - s (string input) and S (song dict)
-        result = proxy.call_nn_infill('<extra_id_0>N:60;d:240', {})
-        if result and '<extra_id_0>' in result:
-            print("NN proxy server: healthy")
-            if verbose:
-                print(f"  Sample response: {result[:50]}...")
-        else:
-            print("NN proxy server: unexpected response")
-            if verbose:
-                print(f"  Response: {result}")
-    except xmlrpc.client.ProtocolError as e:
-        print(f"NN proxy server: protocol error - {e.errcode}: {e.errmsg}")
-        if verbose:
-            print(f"  URL: {e.url}")
-            print(f"  Headers: {e.headers}")
-    except xmlrpc.client.Fault as e:
-        print(f"NN proxy server: RPC fault - {e.faultCode}: {e.faultString}")
-        if verbose:
-            print(f"  This usually means the server is running but there's an issue with the function call")
-    except ConnectionRefusedError as e:
-        print("NN proxy server: connection refused")
-        if verbose:
-            print(f"  Details: {e}")
-    except Exception as e:
-        print(f"NN proxy server: error - {type(e).__name__}: {e}")
-        if verbose:
-            import traceback
-            print(f"  Full traceback:")
-            traceback.print_exc()
-
-def main():
-    """Main function with verbose option"""
-    if len(sys.argv) < 2:
-        print("Lean Server Management")
-        print("\nUsage:")
-        print("  python start_servers.py start [--verbose]    # Start both servers")
-        print("  python start_servers.py stop                 # Stop servers")
-        print("  python start_servers.py status [--verbose]   # Check health")
-        return
-    
-    command = sys.argv[1].lower()
-    verbose = "--verbose" in sys.argv or "-v" in sys.argv
-    
-    if command == "start":
-        print("Starting midigpt system...")
-        setup_signal_handlers()
-        
-        # Start midigpt first
-        if not start_midigpt():
-            print("ERROR: Failed to start midigpt server")
-            return
-        
-        # Wait for startup
-        time.sleep(2)
-        
-        # Start NN proxy
-        if not start_nn():
-            print("ERROR: Failed to start NN proxy")
-            stop_servers()
-            return
-        
-        # Wait for startup
-        time.sleep(2)
-        
-        print("System ready!")
-        check_health(verbose=verbose)
-        
-        # Keep running
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            stop_servers()
-    
-    elif command == "stop":
-        stop_servers()
-    
-    elif command == "status":
-        check_health(verbose=verbose)
+        print("WARNING: midigpt venv not found, using system Python")
+        print("Expected paths:")
+        for path in venv_paths:
+            print(f"  - {os.path.abspath(path)}")
+        return sys.executable
     
     else:
-        print(f"ERROR: Unknown command: {command}")
-
+        # Use project root .venv for proxy server (Python 3.9+)
+        proxy_venv_paths = [
+            os.path.join('.venv', 'bin', 'python'),  # Unix/Mac
+            os.path.join('.venv', 'Scripts', 'python.exe'),  # Windows
+            os.path.join('.venv', 'Scripts', 'python'),  # Windows alt
+        ]
+        
+        for venv_path in proxy_venv_paths:
+            if os.path.exists(venv_path):
+                abs_path = os.path.abspath(venv_path)
+                print(f"Using proxy venv Python: {abs_path}")
+                return abs_path
+        
+        print("WARNING: .venv not found for proxy server, using system Python")
+        print("Expected paths:")
+        for path in proxy_venv_paths:
+            print(f"  - {os.path.abspath(path)}")
+        return sys.executable
 
 def setup_signal_handlers():
-    """Setup graceful shutdown"""
+    """Setup signal handlers for clean shutdown"""
     def signal_handler(sig, frame):
-        print("\nReceived shutdown signal...")
+        print("\nShutting down servers...")
         stop_servers()
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+def start_server(script_name, server_name):
+    """Start a server with the given script using correct Python executable"""
+    script_path = find_script(script_name)
+    
+    if not script_path:
+        print(f"ERROR: {script_name} not found!")
+        print(f"Current directory: {os.getcwd()}")
+        print("Please run this from the directory containing the server scripts.")
+        return False
+    
+    # Get the correct Python executable for this server
+    python_executable = get_python_executable(server_name)
+    
+    print(f"Starting {server_name}...")
+    print(f"Using script: {script_path}")
+    print(f"Using Python: {python_executable}")
+    
+    try:
+        process = subprocess.Popen([
+            python_executable, script_path
+        ])
+        
+        servers.append((server_name, process))
+        print(f"{server_name} started (PID: {process.pid})")
+        
+        # Give it a moment to start
+        time.sleep(1)
+        
+        # Check if it crashed immediately
+        if process.poll() is not None:
+            print(f"ERROR: {server_name} crashed immediately (exit code: {process.returncode})")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Failed to start {server_name}: {e}")
+        return False
+
+def check_port(port, service_name):
+    """Check if a port is accessible"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    result = sock.connect_ex(('127.0.0.1', port))
+    sock.close()
+    
+    if result == 0:
+        print(f"{service_name}: healthy")
+        return True
+    else:
+        print(f"{service_name}: port not accessible")
+        return False
+
+def stop_servers():
+    """Stop all running servers"""
+    for name, process in servers:
+        try:
+            print(f"Stopping {name}...")
+            process.terminate()
+            process.wait(timeout=5)
+            print(f"Stopped {name}")
+        except subprocess.TimeoutExpired:
+            process.kill()
+            print(f"Force killed {name}")
+        except Exception as e:
+            print(f"ERROR stopping {name}: {e}")
+    
+    servers.clear()
+
+def verify_environments():
+    """Verify that both environments are set up correctly"""
+    print("Verifying environments...")
+    
+    # Check midigpt venv
+    midigpt_python = get_python_executable("midigpt server")
+    if 'midigpt_workspace' in midigpt_python:
+        print(f"✅ midigpt venv found: {midigpt_python}")
+    else:
+        print("⚠️  WARNING: midigpt venv not found, using system Python")
+    
+    # Check proxy venv
+    proxy_python = get_python_executable("proxy server")
+    if '.venv' in proxy_python:
+        print(f"✅ Proxy venv found: {proxy_python}")
+    else:
+        print("⚠️  WARNING: .venv not found for proxy server, using system Python")
+    
+    return True
+
 def main():
-    """Main function"""
     if len(sys.argv) < 2:
-        print("Lean Server Management")
+        print("Server Management")
         print("\nUsage:")
         print("  python start_servers.py start    # Start both servers")
         print("  python start_servers.py stop     # Stop servers")
-        print("  python start_servers.py status   # Check health")
+        print("  python start_servers.py status   # Check server status")
+        print("  python start_servers.py verify   # Verify environments")
         return
     
     command = sys.argv[1].lower()
     
     if command == "start":
         print("Starting midigpt system...")
-        setup_signal_handlers()
         
-        # Start midigpt first
-        if not start_midigpt():
-            print("ERROR: Failed to start midigpt server")
+        # Verify environments first
+        if not verify_environments():
             return
         
-        # Wait for startup
+        setup_signal_handlers()
+        
+        # Start midigpt server (will use venv)
+        if not start_server('midigpt_server.py', 'midigpt server'):
+            print("Failed to start midigpt server")
+            return
+        
         time.sleep(2)
         
-        # Start NN proxy
-        if not start_nn():
-            print("ERROR: Failed to start NN proxy")
+        # Start NN proxy server (will use current Python)
+        if not start_server('proxy_nn_server.py', 'NN proxy server'):
+            print("Failed to start NN proxy server")
             stop_servers()
             return
         
-        # Wait for startup
         time.sleep(2)
         
         print("System ready!")
-        check_health()
+        
+        # Check health
+        print("Checking server health...")
+        check_port(3457, "midigpt server")
+        check_port(3456, "NN proxy server")
         
         # Keep running
         try:
+            print("\nServers running. Press Ctrl+C to stop.")
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
@@ -289,10 +227,15 @@ def main():
         stop_servers()
     
     elif command == "status":
-        check_health()
+        print("Checking server health...")
+        check_port(3457, "midigpt server")
+        check_port(3456, "NN proxy server")
+    
+    elif command == "verify":
+        verify_environments()
     
     else:
-        print(f"ERROR: Unknown command: {command}")
+        print(f"Unknown command: {command}")
 
 if __name__ == "__main__":
     main()

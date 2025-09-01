@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 NN Proxy Server - Creates MIDI files for midigpt server to load
+Fixed to handle infilling from empty MIDI items (extra_id tokens only)
 """
 
 import os
@@ -33,7 +34,6 @@ try:
     USE_MIDO = True
 except ImportError:
     try:
-        # Fallback to miditoolkit if available
         import miditoolkit
         print('miditoolkit library loaded for MIDI file creation')
         MIDI_LIB_AVAILABLE = True
@@ -47,15 +47,7 @@ LAST_CALL = ''
 LAST_OUTPUTS = set()
 
 def normalize_requests(input_s: str) -> str:
-    """Normalize input for caching"""
-    def norm_extra_id(s):
-        first_loc = s.find('<extra_id_')
-        if first_loc != -1:
-            second_loc = s.find('>', first_loc)
-            s = s[:first_loc] + '<e>' + s[second_loc + 1:]
-            return norm_extra_id(s)
-        return s
-
+    """Normalize input for caching - preserve extra_id numbers for proper mapping"""
     def norm_measure(s):
         first_loc = s.find(';M:')
         if first_loc != -1:
@@ -67,133 +59,214 @@ def normalize_requests(input_s: str) -> str:
             return norm_measure(s)
         return s
 
-    return norm_measure(norm_extra_id(input_s))
+    # Don't normalize extra_id tokens - they need to be preserved for proper mapping
+    return norm_measure(input_s)
 
 def parse_legacy_notes(legacy_input: str) -> List[Dict]:
     """Parse legacy REAPER format into note list"""
     note_pattern = r'N:(\d+);d:(\d+)(?:;w:(\d+))?'
-    notes = re.findall(note_pattern, legacy_input)
-    
-    parsed_notes = []
+    notes = []
     current_time = 0
     
-    for pitch_str, duration_str, wait_str in notes:
-        pitch = int(pitch_str)
-        duration = int(duration_str)
-        wait = int(wait_str) if wait_str else 0
+    for match in re.finditer(note_pattern, legacy_input):
+        pitch = int(match.group(1))
+        duration = int(match.group(2))
+        wait = int(match.group(3)) if match.group(3) else 0
         
-        note = {
+        current_time += wait
+        
+        notes.append({
             'pitch': pitch,
             'velocity': 80,
             'start_time': current_time,
             'duration': duration
-        }
-        parsed_notes.append(note)
-        current_time += duration + wait
+        })
+        
+        current_time += duration
     
-    return parsed_notes
+    return notes
+
+def extract_extra_id_tokens(input_string: str) -> List[int]:
+    """Extract extra_id token numbers from input string"""
+    extra_ids = []
+    pattern = r'<extra_id_(\d+)>'
+    matches = re.findall(pattern, input_string)
+    for match in matches:
+        extra_ids.append(int(match))
+    return extra_ids
+
+def has_extra_id_tokens(input_string: str) -> bool:
+    """Check if input contains extra_id tokens (infill markers)"""
+    return '<extra_id_' in input_string
+
+def extract_context_info(legacy_input: str) -> Dict:
+    """Extract context information from legacy input string"""
+    context = {
+        'measure_count': legacy_input.count(';M:'),
+        'bar_length': 96,  # Default bar length
+        'extra_id_count': len(re.findall(r'<extra_id_\d+>', legacy_input))
+    }
+    
+    # Try to extract bar length if present
+    bar_match = re.search(r';L:(\d+)', legacy_input)
+    if bar_match:
+        context['bar_length'] = int(bar_match.group(1))
+    
+    return context
+
+def create_minimal_context_midi(context: Dict, filename: str) -> bool:
+    """Create a minimal MIDI file with enough bars for model requirements"""
+    try:
+        # Model requires at least 4 bars of content, but cap at maximum supported
+        MAX_MODEL_BARS = 4
+        model_dim = 4
+        bars_needed = min(MAX_MODEL_BARS, max(model_dim, context.get('measure_count', 1)))
+        
+        if context.get('measure_count', 1) > MAX_MODEL_BARS:
+            print(f"Warning: Requested {context.get('measure_count', 1)} bars, but model supports max {MAX_MODEL_BARS}. Using {bars_needed} bars.")
+        
+        ticks_per_beat = 480
+        beats_per_bar = 4  # 4/4 time signature
+        ticks_per_bar = ticks_per_beat * beats_per_bar  # 1920 ticks per bar
+        
+        if USE_MIDO:
+            # Create with mido
+            mid = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+            track = mido.MidiTrack()
+            mid.tracks.append(track)
+            
+            # Set basic tempo and time signature
+            track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))  # 120 BPM
+            track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+            track.append(mido.Message('program_change', channel=0, program=1, time=0))
+            
+            # Add notes across multiple bars to give model sufficient context
+            current_time = 0
+            for bar in range(bars_needed):
+                bar_start_time = bar * ticks_per_bar
+                
+                # Add a few notes per bar to create realistic musical content
+                notes_in_bar = [
+                    (60, 0, ticks_per_beat),      # C4 on beat 1
+                    (64, ticks_per_beat, ticks_per_beat),  # E4 on beat 2  
+                    (67, ticks_per_beat * 2, ticks_per_beat),  # G4 on beat 3
+                    (60, ticks_per_beat * 3, ticks_per_beat),  # C4 on beat 4
+                ]
+                
+                for pitch, offset, duration in notes_in_bar:
+                    note_time = bar_start_time + offset
+                    
+                    # Note on
+                    delta_time = note_time - current_time
+                    track.append(mido.Message('note_on', channel=0, note=pitch, 
+                                            velocity=80, time=delta_time))
+                    current_time = note_time
+                    
+                    # Note off
+                    track.append(mido.Message('note_off', channel=0, note=pitch, 
+                                            velocity=80, time=duration))
+                    current_time += duration
+            
+            mid.save(filename)
+            return True
+            
+        else:
+            # Create with miditoolkit
+            import miditoolkit
+            midi_obj = miditoolkit.MidiFile(ticks_per_beat=ticks_per_beat)
+            
+            instrument = miditoolkit.Instrument(program=1, is_drum=False, name='Piano')
+            
+            # Add notes across multiple bars
+            for bar in range(bars_needed):
+                bar_start_time = bar * ticks_per_bar
+                
+                # Add a few notes per bar
+                notes_in_bar = [
+                    (60, 0, ticks_per_beat),      # C4 on beat 1
+                    (64, ticks_per_beat, ticks_per_beat),  # E4 on beat 2  
+                    (67, ticks_per_beat * 2, ticks_per_beat),  # G4 on beat 3
+                    (60, ticks_per_beat * 3, ticks_per_beat),  # C4 on beat 4
+                ]
+                
+                for pitch, offset, duration in notes_in_bar:
+                    midi_note = miditoolkit.Note(
+                        velocity=80,
+                        pitch=pitch,
+                        start=bar_start_time + offset,
+                        end=bar_start_time + offset + duration
+                    )
+                    instrument.notes.append(midi_note)
+            
+            midi_obj.instruments.append(instrument)
+            midi_obj.dump(filename)
+            return True
+            
+    except Exception as e:
+        if DEBUG:
+            print(f"Error creating context MIDI file: {e}")
+        return False
 
 def create_midi_file(notes: List[Dict], filename: str) -> bool:
-    """Create MIDI file using available library"""
-    if not MIDI_LIB_AVAILABLE:
-        return False
-    
-    if USE_MIDO:
-        return create_midi_file_mido(notes, filename)
-    else:
-        return create_midi_file_miditoolkit(notes, filename)
-
-def create_midi_file_mido(notes: List[Dict], filename: str) -> bool:
-    """Create MIDI file using mido library"""
+    """Create MIDI file from note list"""
     try:
-        import mido
-        
-        # Create a new MIDI file
-        mid = mido.MidiFile(ticks_per_beat=480)
-        track = mido.MidiTrack()
-        mid.tracks.append(track)
-        
-        # Set tempo (120 BPM)
-        track.append(mido.MetaMessage('set_tempo', tempo=500000))
-        
-        # Convert notes to MIDI events
-        events = []
-        for note in notes:
-            # Note on
-            events.append({
-                'time': note['start_time'],
-                'type': 'note_on',
-                'pitch': note['pitch'],
-                'velocity': note['velocity']
-            })
-            # Note off
-            events.append({
-                'time': note['start_time'] + note['duration'],
-                'type': 'note_off', 
-                'pitch': note['pitch'],
-                'velocity': 0
-            })
-        
-        # Sort events by time
-        events.sort(key=lambda x: (x['time'], x['type'] == 'note_off'))
-        
-        # Convert to delta time and add to track
-        last_time = 0
-        for event in events:
-            delta_time = max(0, event['time'] - last_time)
+        if not notes:
+            return False
             
-            if event['type'] == 'note_on':
-                track.append(mido.Message('note_on', 
-                                        channel=0, 
-                                        note=event['pitch'], 
-                                        velocity=event['velocity'], 
-                                        time=delta_time))
-            else:  # note_off
-                track.append(mido.Message('note_off', 
-                                        channel=0, 
-                                        note=event['pitch'], 
-                                        velocity=0, 
-                                        time=delta_time))
+        if USE_MIDO:
+            # Create with mido
+            mid = mido.MidiFile()
+            track = mido.MidiTrack()
+            mid.tracks.append(track)
             
-            last_time = event['time']
-        
-        # Save the file
-        mid.save(filename)
-        return True
-        
+            # Set basic tempo
+            track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+            track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+            track.append(mido.Message('program_change', channel=0, program=1, time=0))
+            
+            # Sort notes by start time
+            notes = sorted(notes, key=lambda x: x['start_time'])
+            
+            current_time = 0
+            for note in notes:
+                # Note on
+                delta_time = note['start_time'] - current_time
+                track.append(mido.Message('note_on', channel=0, note=note['pitch'], 
+                                        velocity=note['velocity'], time=delta_time))
+                current_time = note['start_time']
+                
+                # Note off
+                track.append(mido.Message('note_off', channel=0, note=note['pitch'], 
+                                        velocity=note['velocity'], time=note['duration']))
+                current_time += note['duration']
+            
+            mid.save(filename)
+            return True
+            
+        else:
+            # Create with miditoolkit
+            import miditoolkit
+            midi_obj = miditoolkit.MidiFile()
+            midi_obj.ticks_per_beat = 480
+            
+            instrument = miditoolkit.Instrument(program=1, is_drum=False, name='Piano')
+            
+            for note in notes:
+                midi_note = miditoolkit.Note(
+                    velocity=note['velocity'],
+                    pitch=note['pitch'],
+                    start=note['start_time'],
+                    end=note['start_time'] + note['duration']
+                )
+                instrument.notes.append(midi_note)
+            
+            midi_obj.instruments.append(instrument)
+            midi_obj.dump(filename)
+            return True
+            
     except Exception as e:
         if DEBUG:
-            print(f"Error creating MIDI file with mido: {e}")
-        return False
-
-def create_midi_file_miditoolkit(notes: List[Dict], filename: str) -> bool:
-    """Create MIDI file using miditoolkit library"""
-    try:
-        import miditoolkit
-        
-        # Create new MIDI file
-        midi_obj = miditoolkit.MidiFile(ticks_per_beat=480)
-        
-        # Create instrument track
-        instrument = miditoolkit.Instrument(program=0, is_drum=False, name='Piano')
-        
-        # Add notes
-        for note in notes:
-            midi_note = miditoolkit.Note(
-                velocity=note['velocity'],
-                pitch=note['pitch'],
-                start=note['start_time'],
-                end=note['start_time'] + note['duration']
-            )
-            instrument.notes.append(midi_note)
-        
-        midi_obj.instruments.append(instrument)
-        midi_obj.dump(filename)
-        return True
-        
-    except Exception as e:
-        if DEBUG:
-            print(f"Error creating MIDI file with miditoolkit: {e}")
+            print(f"Error creating MIDI file: {e}")
         return False
 
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, has_fully_masked_inst=False, temperature=1.0):
@@ -205,6 +278,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         print('LEGACY CALL_NN_INFILL RECEIVED')
         print(f"Input: {s[:100]}...")
         print(f"Temperature: {temperature}")
+        print(f"Has extra_id tokens: {has_extra_id_tokens(s)}")
     
     try:
         # Check cache
@@ -217,29 +291,56 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if not MIDI_LIB_AVAILABLE:
             raise Exception("No MIDI library available - install mido or miditoolkit")
         
-        # Parse legacy format
-        notes = parse_legacy_notes(s)
-        
-        if not notes:
-            raise Exception("No notes found in legacy input")
-        
         # Create unique MIDI file
         midi_filename = f"input_{uuid.uuid4().hex[:8]}.mid"
         midi_path = os.path.join(SHARED_MIDI_DIR, midi_filename)
         
-        # Create MIDI file
-        midi_created = create_midi_file(notes, midi_path)
+        # Check if this is an infilling request (contains extra_id tokens)
+        if has_extra_id_tokens(s):
+            if DEBUG:
+                print("Detected infilling request (extra_id tokens present)")
+            
+            # Extract the specific extra_id tokens requested
+            requested_extra_ids = extract_extra_id_tokens(s)
+            if DEBUG:
+                print(f"Requested extra_ids: {requested_extra_ids}")
+            
+            # Extract context information
+            context = extract_context_info(s)
+            context['extra_id_tokens'] = requested_extra_ids
+            if DEBUG:
+                print(f"Context: {context}")
+            
+            # For infilling, create a minimal context MIDI file
+            # The midigpt model will generate new content to fill the masked regions
+            midi_created = create_minimal_context_midi(context, midi_path)
+            
+        else:
+            # Parse existing notes for variation/continuation
+            notes = parse_legacy_notes(s)
+            
+            if not notes:
+                if DEBUG:
+                    print("No notes found and no extra_id tokens - creating minimal context")
+                # Fallback: create minimal context
+                context = {'bar_length': 96, 'measure_count': 1}
+                midi_created = create_minimal_context_midi(context, midi_path)
+            else:
+                if DEBUG:
+                    print(f"Parsed {len(notes)} notes for variation/continuation")
+                midi_created = create_midi_file(notes, midi_path)
         
         if not midi_created:
             raise Exception("Failed to create MIDI file")
         
         if DEBUG:
             print(f"Created MIDI file: {midi_path}")
-            print(f"Notes converted: {len(notes)}")
         
         # Send MIDI file path to midigpt server
         request_data = {
-            'midi_file': midi_path,  # Send file path instead of protobuf
+            'midi_file': midi_path,
+            'is_infill': has_extra_id_tokens(s),
+            'requested_extra_ids': extract_extra_id_tokens(s) if has_extra_id_tokens(s) else [0],
             'legacy_params': {
                 'temperature': temperature,
                 'use_sampling': use_sampling,
@@ -250,7 +351,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         }
         
         response = requests.post(
-            f'{MIDIGPT_SERVER_URL}/generate_from_midi',  # New endpoint
+            f'{MIDIGPT_SERVER_URL}/generate_from_midi',
             json=request_data,
             timeout=120
         )
@@ -277,17 +378,17 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         LAST_OUTPUTS.add(normalize_requests(legacy_result))
         
         if DEBUG:
-            print(f"✅ Successfully generated via MIDI file approach!")
+            print(f"Successfully generated result")
         
         return legacy_result
         
     except Exception as e:
         if DEBUG:
-            print(f'Error in MIDI file approach: {e}')
+            print(f'Error in infill processing: {e}')
             import traceback
             traceback.print_exc()
         
-        # Return fallback
+        # Return fallback result
         return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240"
 
 def start_xmlrpc_server():
@@ -303,7 +404,7 @@ def start_xmlrpc_server():
             lib_name = "mido" if USE_MIDO else "miditoolkit"
             print(f"Using {lib_name} for MIDI file creation")
         else:
-            print("⚠️ WARNING: No MIDI library available - install mido or miditoolkit")
+            print("WARNING: No MIDI library available - install mido or miditoolkit")
         
         server.serve_forever()
         
