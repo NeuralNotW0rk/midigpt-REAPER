@@ -254,20 +254,20 @@ def tail_logs():
 
 def main():
     if len(sys.argv) < 2:
-        print("Unified MidiGPT-REAPER Server Management")
+        print("MidiGPT-REAPER Server Management")
         print("\nUsage:")
-        print("  python start_unified.py start     # Start server")
-        print("  python start_unified.py stop      # Stop server")  
-        print("  python start_unified.py status    # Check server status")
-        print("  python start_unified.py verify    # Verify environment")
-        print("  python start_unified.py logs      # Show live logs")
-        print("  python start_unified.py restart   # Restart server")
+        print("  python start_midigpt.py start     # Start server")
+        print("  python start_midigpt.py stop      # Stop server")  
+        print("  python start_midigpt.py status    # Check server status")
+        print("  python start_midigpt.py verify    # Verify environment")
+        print("  python start_midigpt.py logs      # Show live logs")
+        print("  python start_midigpt.py restart   # Restart server")
         return
     
     command = sys.argv[1].lower()
     
     if command == "start":
-        print("Starting unified MidiGPT-REAPER server...")
+        print("Starting MidiGPT-REAPER server...")
         
         if not verify_environment():
             return

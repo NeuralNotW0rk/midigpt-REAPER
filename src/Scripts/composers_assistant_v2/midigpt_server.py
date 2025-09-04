@@ -474,7 +474,7 @@ def cleanup_temp_files():
 
 def main():
     """Main entry point"""
-    print("Unified MidiGPT-REAPER Server")
+    print("MidiGPT-REAPER Server")
     print(f"Python version: {sys.version}")
     print(f"MIDI library available: {MIDI_LIB_AVAILABLE}")
     print(f"midigpt available: {MIDIGPT_AVAILABLE}")
