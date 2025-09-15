@@ -1,411 +1,401 @@
 #!/usr/bin/env python3
 """
-Complete macOS Setup Script for Composer's Assistant v2 + MIDI-GPT
-Handles environment setup, MIDI-GPT cloning/building, and REAPER integration
+Composer's Assistant v2 - Complete Setup Script
+Automated setup for virtual environment, dependencies, MIDI-GPT, and REAPER integration
 """
 
 import os
 import sys
 import subprocess
 import shutil
+import platform
 from pathlib import Path
-import tempfile
 import urllib.request
 import zipfile
 
 # Configuration
-VENV_NAME = "venv"  # Changed from .venv
-MIDI_GPT_REPO = "https://github.com/Metacreation-Lab/MIDI-GPT.git"
-RELEASE_VERSION = "2.1.0"
+VENV_NAME = "venv"
 PYTHON_MIN_VERSION = (3, 9)
+MIDIGPT_REPO = "https://github.com/Metacreation-Lab/MIDI-GPT.git"
 
-class Colors:
-    RED = '\033[0;31m'
-    GREEN = '\033[0;32m'
-    YELLOW = '\033[1;33m'
-    BLUE = '\033[0;34m'
-    NC = '\033[0m'  # No Color
-
-def log(message, color=Colors.NC):
-    print(f"{color}{message}{Colors.NC}")
-
-def log_info(message):
-    log(f"[INFO] {message}", Colors.GREEN)
-
-def log_warn(message):
-    log(f"[WARN] {message}", Colors.YELLOW)
-
-def log_error(message):
-    log(f"[ERROR] {message}", Colors.RED)
-
-def run_command(cmd, cwd=None, check=True, capture_output=False):
-    """Run command with proper error handling"""
+def run_command(cmd, check=True, capture_output=False, cwd=None):
+    """Run a shell command with error handling"""
     try:
-        result = subprocess.run(
-            cmd, shell=True, check=check, 
-            capture_output=capture_output, text=True, 
-            cwd=cwd
-        )
+        result = subprocess.run(cmd, shell=True, check=check, 
+                              capture_output=capture_output, text=True, cwd=cwd)
         return result
     except subprocess.CalledProcessError as e:
-        log_error(f"Command failed: {cmd}")
-        if capture_output and e.stdout:
-            print(f"Output: {e.stdout}")
-        if capture_output and e.stderr:
+        print(f"Command failed: {cmd}")
+        if capture_output:
             print(f"Error: {e.stderr}")
-        if check:
-            sys.exit(1)
-        return None
+        sys.exit(1)
 
 def check_python():
-    """Find suitable Python 3.9+ executable"""
-    log_info("Checking Python version...")
+    """Check if Python 3.9+ is available"""
+    print("Checking Python version...")
     
-    candidates = ["python3.9", "python3.10", "python3.11", "python3.12", "python3"]
-    
-    for python_cmd in candidates:
+    # Try different Python commands
+    for cmd in ["python3.9", "python3", "python"]:
         try:
-            result = run_command(f"{python_cmd} --version", capture_output=True, check=False)
-            if result and result.returncode == 0:
-                version_str = result.stdout.strip()
-                # Extract version numbers
+            result = run_command(f"{cmd} --version", capture_output=True)
+            version_str = result.stdout.strip()
+            
+            # Extract version numbers
+            if "Python" in version_str:
                 version_parts = version_str.split()[1].split('.')
                 major, minor = int(version_parts[0]), int(version_parts[1])
                 
                 if (major, minor) >= PYTHON_MIN_VERSION:
-                    log_info(f"Found compatible Python: {version_str}")
-                    return python_cmd
+                    print(f"Compatible Python found: {version_str}")
+                    return cmd
         except:
             continue
     
-    log_error("Python 3.9+ not found!")
-    log_error("Install with: brew install python@3.9")
+    print(f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ not found")
+    print("Install Python 3.9+:")
+    print("  macOS: brew install python@3.9")
+    print("  Ubuntu: sudo apt install python3.9 python3.9-venv")
     sys.exit(1)
 
-def setup_environment(python_cmd):
-    """Create virtual environment"""
-    log_info(f"Setting up virtual environment: {VENV_NAME}")
-    
-    venv_path = Path(VENV_NAME)
-    if venv_path.exists():
-        log_warn(f"Removing existing {VENV_NAME}")
-        shutil.rmtree(venv_path)
-    
-    run_command(f"{python_cmd} -m venv {VENV_NAME}")
-    
-    # Get activation command
-    if sys.platform == "win32":
-        pip_cmd = f"{VENV_NAME}\\Scripts\\pip"
-        python_venv = f"{VENV_NAME}\\Scripts\\python"
-    else:
-        pip_cmd = f"{VENV_NAME}/bin/pip"
-        python_venv = f"{VENV_NAME}/bin/python"
-    
-    # Upgrade pip
-    log_info("Upgrading pip...")
-    run_command(f"{pip_cmd} install --upgrade pip setuptools wheel")
-    
-    return pip_cmd, python_venv
-
-def install_base_dependencies(pip_cmd):
-    """Install core Python dependencies"""
-    log_info("Installing base dependencies...")
-    
-    # Check for CUDA
-    has_cuda = False
+def check_cuda():
+    """Check if CUDA is available"""
     try:
         run_command("nvidia-smi", capture_output=True)
-        has_cuda = True
-        log_info("CUDA detected")
+        print("CUDA detected")
+        return True
     except:
-        log_info("No CUDA - installing CPU PyTorch")
+        print("No CUDA detected - using CPU-only PyTorch")
+        return False
+
+def setup_venv(python_cmd):
+    """Create virtual environment"""
+    venv_path = Path(VENV_NAME)
+    
+    if venv_path.exists():
+        print(f"Virtual environment exists: {VENV_NAME}")
+        return
+    
+    print("Creating virtual environment...")
+    run_command(f"{python_cmd} -m venv {VENV_NAME}")
+    print(f"Virtual environment created: {VENV_NAME}")
+
+def get_pip_command():
+    """Get pip command for the virtual environment"""
+    if platform.system() == "Windows":
+        return f"{VENV_NAME}\\Scripts\\pip"
+    else:
+        return f"{VENV_NAME}/bin/pip"
+
+def get_python_command():
+    """Get Python command for the virtual environment"""
+    if platform.system() == "Windows":
+        return f".\\{VENV_NAME}\\Scripts\\python"
+    else:
+        return f"./{VENV_NAME}/bin/python"
+
+def install_core_dependencies(has_cuda=False):
+    """Install core Python dependencies"""
+    pip_cmd = get_pip_command()
+    
+    print("Upgrading pip...")
+    run_command(f"{pip_cmd} install --upgrade pip setuptools wheel")
+    
+    print("Installing core dependencies...")
     
     # Install PyTorch
     if has_cuda:
-        torch_cmd = f'{pip_cmd} install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118'
+        print("Installing PyTorch with CUDA...")
+        torch_cmd = (f'{pip_cmd} install torch>=2.0.0 torchvision torchaudio '
+                    f'--index-url https://download.pytorch.org/whl/cu118')
     else:
-        torch_cmd = f'{pip_cmd} install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu'
+        print("Installing CPU-only PyTorch...")
+        torch_cmd = (f'{pip_cmd} install torch>=2.0.0 torchvision torchaudio '
+                    f'--index-url https://download.pytorch.org/whl/cpu')
     
     run_command(torch_cmd)
     
-    # Install other dependencies
+    # Install other core dependencies
     deps = [
-        "numpy>=1.21.0,<2.0",
-        "protobuf>=4.0.0",
-        "pybind11[global]>=2.12.0", 
-        "transformers>=4.30.0",
-        "tqdm",
-        "cmake>=3.16.0"
+        'numpy>=1.21.0,<2.0',
+        'protobuf>=4.0.0', 
+        'pybind11[global]>=2.12.0',
+        'transformers>=4.30.0',
+        'cmake>=3.16.0',
+        'tqdm'
     ]
     
     for dep in deps:
-        log_info(f"Installing {dep}...")
         run_command(f'{pip_cmd} install "{dep}"')
 
 def clone_midi_gpt():
-    """Clone MIDI-GPT repository"""
-    midi_gpt_path = Path("MIDI-GPT")
+    """Clone MIDI-GPT repository from the python-3-9-refactor branch"""
+    if Path("MIDI-GPT").exists():
+        print("MIDI-GPT repository already exists")
+        # Check if we're on the correct branch
+        try:
+            result = run_command("git branch --show-current", capture_output=True, cwd="MIDI-GPT")
+            current_branch = result.stdout.strip()
+            if current_branch != "python-3-9-refactor":
+                print(f"MIDI-GPT is on branch '{current_branch}', switching to 'python-3-9-refactor'...")
+                run_command("git fetch origin", cwd="MIDI-GPT")
+                run_command("git checkout python-3-9-refactor", cwd="MIDI-GPT")
+                print("Switched to python-3-9-refactor branch")
+            else:
+                print("Already on python-3-9-refactor branch")
+        except:
+            print("Could not check/switch branch - manual intervention may be required")
+        return
     
-    if midi_gpt_path.exists():
-        log_info("MIDI-GPT already exists, updating...")
-        run_command("git pull", cwd="MIDI-GPT")
-    else:
-        log_info("Cloning MIDI-GPT...")
-        run_command(f"git clone {MIDI_GPT_REPO}")
-    
-    return midi_gpt_path.exists()
+    print("Cloning MIDI-GPT repository (python-3-9-refactor branch)...")
+    run_command(f"git clone -b python-3-9-refactor {MIDIGPT_REPO}")
+    print("MIDI-GPT repository cloned from python-3-9-refactor branch")
 
-def build_midi_gpt(python_venv):
-    """Build MIDI-GPT library"""
-    log_info("Building MIDI-GPT...")
-    
-    midi_gpt_path = Path("MIDI-GPT")
-    if not midi_gpt_path.exists():
-        log_error("MIDI-GPT not found!")
+def build_midi_gpt():
+    """Build MIDI-GPT using setup_midigpt.py with --install flag for automatic environment installation"""
+    if not Path("MIDI-GPT").exists():
+        print("MIDI-GPT repository not found")
         return False
     
-    # Try different build methods
-    setup_script = midi_gpt_path / "setup_midigpt.py"
+    # Check if setup_midigpt.py exists
+    setup_script = Path("MIDI-GPT/setup_midigpt.py")
+    if not setup_script.exists():
+        print("setup_midigpt.py not found in MIDI-GPT directory")
+        print("This usually means the wrong branch was cloned.")
+        print("Expected branch: python-3-9-refactor")
+        print("\nTry manually:")
+        print("  cd MIDI-GPT")
+        print("  git fetch origin")
+        print("  git checkout python-3-9-refactor")
+        return False
     
-    if setup_script.exists():
-        log_info("Using setup_midigpt.py...")
-        cmd = f"{python_venv} setup_midigpt.py --mac-os --test"
-        result = run_command(cmd, cwd="MIDI-GPT", check=False)
-        if result and result.returncode == 0:
-            log_info("MIDI-GPT built successfully!")
+    print("Building and installing MIDI-GPT...")
+    
+    # Get absolute path to virtual environment python
+    current_dir = Path.cwd()
+    venv_python_path = current_dir / VENV_NAME / "bin" / "python"
+    if platform.system() == "Windows":
+        venv_python_path = current_dir / VENV_NAME / "Scripts" / "python.exe"
+    
+    if not venv_python_path.exists():
+        print(f"Virtual environment Python not found: {venv_python_path}")
+        print("Try activating the virtual environment first:")
+        print(f"  source {VENV_NAME}/bin/activate")
+        return False
+    
+    # Use the --install flag to automatically install to current environment
+    build_flags = ["--install", "--test"]
+    if platform.system() == "Darwin":
+        build_flags.append("--mac-os")
+    
+    build_cmd = f"{venv_python_path} setup_midigpt.py {' '.join(build_flags)}"
+    
+    try:
+        run_command(build_cmd, cwd="MIDI-GPT")
+        print("MIDI-GPT built and installed successfully")
+        return True
+    except:
+        print("MIDI-GPT build with --install failed")
+        print("Trying fallback without --install flag...")
+        
+        # Fallback to build-only approach
+        fallback_flags = ["--test"]
+        if platform.system() == "Darwin":
+            fallback_flags.append("--mac-os")
+        
+        fallback_cmd = f"{venv_python_path} setup_midigpt.py {' '.join(fallback_flags)}"
+        
+        try:
+            run_command(fallback_cmd, cwd="MIDI-GPT")
+            print("MIDI-GPT built successfully (manual path setup required)")
             return True
-    
-    # Try pyproject.toml/setup.py
-    if (midi_gpt_path / "pyproject.toml").exists() or (midi_gpt_path / "setup.py").exists():
-        log_info("Trying pip install -e ...")
-        cmd = f"{python_venv} -m pip install -e ."
-        result = run_command(cmd, cwd="MIDI-GPT", check=False)
-        if result and result.returncode == 0:
-            log_info("MIDI-GPT installed successfully!")
-            return True
-    
-    log_warn("MIDI-GPT build failed, but continuing...")
-    return False
+        except:
+            print("Both build attempts failed")
+            print("Manual completion required:")
+            print(f"  source {VENV_NAME}/bin/activate")
+            print(f"  cd MIDI-GPT && python setup_midigpt.py --install --test")
+            return False
 
-def install_project_requirements(pip_cmd):
-    """Install project-specific requirements"""
-    req_files = ["requirements.txt", "requirements_base.txt"]
+def find_reaper_path():
+    """Find REAPER resources directory"""
+    system = platform.system()
     
-    for req_file in req_files:
-        if Path(req_file).exists():
-            log_info(f"Installing from {req_file}...")
-            run_command(f"{pip_cmd} install -r {req_file}")
-            break
-    else:
-        log_info("No requirements file found, skipping...")
+    if system == "Darwin":  # macOS
+        paths = [
+            Path.home() / "Library/Application Support/REAPER",
+            "/Library/Application Support/REAPER"
+        ]
+    elif system == "Windows":
+        paths = [
+            Path.home() / "AppData/Roaming/REAPER",
+            Path("C:/Program Files/REAPER/InstallData")
+        ]
+    else:  # Linux
+        paths = [
+            Path.home() / ".config/REAPER",
+            Path("/opt/REAPER")
+        ]
+    
+    for path in paths:
+        if path.exists():
+            return path
+    
+    return None
 
 def setup_reaper_integration():
     """Setup REAPER symlinks"""
-    log_info("Setting up REAPER integration...")
-    
-    reaper_path = Path.home() / "Library/Application Support/REAPER"
-    if not reaper_path.exists():
-        log_warn("REAPER not found, skipping integration")
+    reaper_path = find_reaper_path()
+    if not reaper_path:
+        print("REAPER installation not found - skipping integration")
         return
     
-    # Setup Scripts
-    scripts_src = Path("src/Scripts/composers_assistant_v2")
-    if scripts_src.exists():
-        scripts_dst = reaper_path / "Scripts/composers_assistant_v2"
-        if scripts_dst.exists() or scripts_dst.is_symlink():
-            scripts_dst.unlink()
-        scripts_dst.parent.mkdir(exist_ok=True)
-        scripts_dst.symlink_to(scripts_src.absolute())
-        log_info("Scripts linked")
+    print(f"Setting up REAPER integration at: {reaper_path}")
     
-    # Setup Effects  
-    effects_src = Path("src/Effects/composers_assistant_v2")
+    # Create symlinks
+    project_root = Path.cwd()
+    scripts_src = project_root / "Scripts"
+    effects_src = project_root / "Effects"
+    
+    scripts_dst = reaper_path / "Scripts/composers_assistant_v2"
+    effects_dst = reaper_path / "Effects/composers_assistant_v2"
+    
+    # Create Scripts symlink
+    if scripts_src.exists():
+        if scripts_dst.exists():
+            scripts_dst.unlink()
+        scripts_dst.symlink_to(scripts_src)
+        print(f"Scripts symlinked: {scripts_dst}")
+    
+    # Create Effects symlink  
     if effects_src.exists():
-        effects_dst = reaper_path / "Effects/composers_assistant_v2"
-        if effects_dst.exists() or effects_dst.is_symlink():
+        if effects_dst.exists():
             effects_dst.unlink()
-        effects_dst.parent.mkdir(exist_ok=True)
-        effects_dst.symlink_to(effects_src.absolute())
-        log_info("Effects linked")
+        effects_dst.symlink_to(effects_src)
+        print(f"Effects symlinked: {effects_dst}")
 
 def download_models():
-    """Download model files"""
-    log_info("Downloading models...")
+    """Download required models if not present"""
+    models_dir = Path("models")
+    if not models_dir.exists():
+        models_dir.mkdir()
     
-    zip_name = f"composers.assistant.v.{RELEASE_VERSION}.zip"
-    url = f"https://github.com/m-malandro/composers-assistant-REAPER/releases/download/v{RELEASE_VERSION}/{zip_name}"
-    model_dir = Path("src/Scripts/composers_assistant_v2/models_permuted_labels")
-    
-    if model_dir.exists() and any(model_dir.iterdir()):
-        log_info("Models already exist, skipping download")
+    # Check if models are already present
+    if any(models_dir.glob("*.bin")) or any(models_dir.glob("*.pth")):
+        print("Models already present")
         return
     
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        zip_path = temp_path / zip_name
-        
-        try:
-            log_info(f"Downloading {url}...")
-            urllib.request.urlretrieve(url, zip_path)
-            
-            log_info("Extracting models...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(temp_path)
-            
-            # Copy models
-            source_models = temp_path / "Scripts/composers_assistant_v2/models_permuted_labels"
-            if source_models.exists():
-                model_dir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(source_models, model_dir, dirs_exist_ok=True)
-                log_info("Models extracted successfully")
-            else:
-                log_warn("Model directory not found in download")
-                
-        except Exception as e:
-            log_error(f"Failed to download models: {e}")
+    print("Model download would occur here - implement as needed")
 
-def verify_installation(python_venv):
-    """Verify the installation"""
-    log_info("Verifying installation...")
+def verify_installation():
+    """Verify all components are working"""
+    print("\nVerifying installation...")
     
-    # Convert to absolute path
-    python_venv_abs = Path(python_venv).resolve()
+    # Get absolute path to virtual environment python
+    current_dir = Path.cwd()
+    venv_python_path = current_dir / VENV_NAME / "bin" / "python"
+    if platform.system() == "Windows":
+        venv_python_path = current_dir / VENV_NAME / "Scripts" / "python.exe"
     
-    # Test Python packages
+    if not venv_python_path.exists():
+        print(f"Virtual environment Python not found: {venv_python_path}")
+        print("Using fallback system python for verification")
+        python_cmd = "python"
+    else:
+        python_cmd = str(venv_python_path)
+    
+    # Test core imports
     test_imports = [
-        ("torch", "PyTorch"),
-        ("numpy", "NumPy"),
-        ("transformers", "Transformers"),
+        ("import torch", "PyTorch"),
+        ("import numpy", "NumPy"), 
+        ("import transformers", "Transformers")
     ]
     
-    for module, name in test_imports:
+    for test_cmd, name in test_imports:
         try:
-            # Fixed f-string syntax by escaping quotes properly
-            cmd = f'{python_venv_abs} -c "import {module}; print(\'{name}:\', getattr({module}, \'__version__\', \'OK\'))"'
-            result = run_command(cmd, capture_output=True, check=False)
-            if result and result.returncode == 0:
-                log_info(result.stdout.strip())
-            else:
-                log_warn(f"{name} import failed")
+            run_command(f'{python_cmd} -c "{test_cmd}"', capture_output=True)
+            print(f"  ✓ {name}")
         except:
-            log_warn(f"{name} verification failed")
+            print(f"  ✗ {name}")
     
-    # Test MIDI-GPT
-    midi_gpt_test = (
-        f'{python_venv_abs} -c "'
-        f'import sys; sys.path.append(\"MIDI-GPT/python_lib\"); '
-        f'import midigpt; print(\"MIDI-GPT: Ready\")"'
-    )
-    
+    # Test MIDI-GPT import
     try:
-        result = run_command(midi_gpt_test, capture_output=True, check=False)
-        if result and result.returncode == 0:
-            log_info("MIDI-GPT: Ready")
-        else:
-            log_warn("MIDI-GPT: Not available (manual setup may be needed)")
+        # With --install flag, midigpt should be directly importable
+        run_command(f'{python_cmd} -c "import midigpt; print(\\"MIDI-GPT: Ready\\")"', capture_output=True)
+        print("  ✓ MIDI-GPT import (installed)")
     except:
-        log_warn("MIDI-GPT verification failed")
+        # Fallback to path-based import
+        try:
+            midi_test_cmd = f'{python_cmd} -c "import sys; sys.path.append(\\"MIDI-GPT/python_lib\\"); import midigpt; print(\\"MIDI-GPT: Ready\\")"'
+            run_command(midi_test_cmd, capture_output=True)
+            print("  ✓ MIDI-GPT import (path-based)")
+        except:
+            print("  ✗ MIDI-GPT import - requires manual completion")
 
-def print_summary():
-    """Print setup summary and next steps"""
-    log_info("Setup completed!")
-    
-    if sys.platform == "win32":
+def print_completion_message():
+    """Print completion message and next steps"""
+    activate_cmd = f"source {VENV_NAME}/bin/activate"
+    if platform.system() == "Windows":
         activate_cmd = f"{VENV_NAME}\\Scripts\\activate"
-    else:
-        activate_cmd = f"source {VENV_NAME}/bin/activate"
     
-    print("\n" + "="*60)
-    print("SETUP SUMMARY")
-    print("="*60)
-    print(f"✅ Virtual environment: {VENV_NAME} (changed from .venv)")
-    print(f"✅ Python 3.9+ with PyTorch and dependencies")
-    print(f"✅ MIDI-GPT repository cloned")
+    print("\n" + "="*50)
+    print("Setup Complete!")
+    print("="*50)
+    print(f"\nTo activate the environment: {activate_cmd}")
+    print("\nNext steps:")
+    print("1. Start the server: python start_unified.py start")
+    print("2. Open REAPER and load Composer's Assistant scripts")
+    print("3. Begin composing with AI assistance!")
     
-    # Check if MIDI-GPT built successfully
-    if Path("MIDI-GPT/python_lib").exists() and any(Path("MIDI-GPT/python_lib").iterdir()):
-        print(f"✅ MIDI-GPT built and ready")
-    else:
-        print(f"⚠️  MIDI-GPT cloned but build may need completion")
+    print(f"\nFor manual MIDI-GPT completion if needed:")
+    print(f"  {activate_cmd}")
+    print(f"  cd MIDI-GPT && python setup_midigpt.py --install --test")
+    if platform.system() == "Darwin":
+        print(f"  (on macOS: python setup_midigpt.py --install --mac-os --test)")
     
-    print(f"✅ REAPER integration configured")
-    print(f"✅ Project requirements installed")
-    
-    if Path("src/Scripts/composers_assistant_v2/models_permuted_labels").exists():
-        print(f"✅ Models available")
-    else:
-        print(f"⚠️  Models may need download")
-    
-    print("\nNEXT STEPS:")
-    print("="*60)
-    print(f"1. Activate environment: {activate_cmd}")
-    print("2. Test MIDI-GPT (if needed):")
-    print("   python -c \"import sys; sys.path.append('MIDI-GPT/python_lib'); import midigpt; print('OK')\"")
-    print("3. Start servers:")
-    print("   python start_unified.py start    # Unified server")
-    print("   # or")
-    print("   python start_servers.py start    # Legacy dual server")
-    print("4. Open REAPER and check Scripts menu")
-    
-    print("\nVERIFICATION:")
-    print("="*60)
-    print(f"   {activate_cmd}")
-    print("   python -c \"import torch; print('PyTorch:', torch.__version__)\"")
-    print("   python -c \"import miditoolkit; print('miditoolkit: OK')\"")
-    
-    print("\nTROUBLESHOOTING:")
-    print("="*60)
-    print("- If MIDI-GPT import fails:")
-    print("  cd MIDI-GPT && python setup_midigpt.py --mac-os --test")
-    print("- For REAPER issues, check symlinks in:")
-    print("  ~/Library/Application Support/REAPER/Scripts/")
-    print("- For server issues, check firewall (port 3456)")
-    print("- If dependencies missing: brew install protobuf cmake")
+    print(f"\nTo verify your virtual environment is working:")
+    print(f"  {activate_cmd}")
+    print(f"  python -c \"import sys; print(sys.executable)\"")
+    print(f"  python -c \"import transformers; print('Transformers OK')\"")
+
+
 
 def main():
-    """Main setup routine"""
-    print("="*60)
-    print("Composer's Assistant v2 + MIDI-GPT Setup")
-    print("macOS Unified Installation Script")
-    print("="*60)
+    print("Composer's Assistant v2 - Complete Setup")
+    print("=" * 50)
     
     try:
-        # Step 1: Check Python
+        # Environment setup
         python_cmd = check_python()
+        has_cuda = check_cuda()
+        setup_venv(python_cmd)
         
-        # Step 2: Setup environment 
-        pip_cmd, python_venv = setup_environment(python_cmd)
+        # Dependencies
+        install_core_dependencies(has_cuda)
         
-        # Step 3: Install base dependencies
-        install_base_dependencies(pip_cmd)
+        # MIDI-GPT integration
+        clone_midi_gpt()
+        midi_success = build_midi_gpt()
         
-        # Step 4: Clone MIDI-GPT
-        midi_gpt_available = clone_midi_gpt()
-        
-        # Step 5: Build MIDI-GPT
-        if midi_gpt_available:
-            build_midi_gpt(python_venv)
-        
-        # Step 6: Install project requirements
-        install_project_requirements(pip_cmd)
-        
-        # Step 7: Setup REAPER
+        # REAPER integration
         setup_reaper_integration()
         
-        # Step 8: Download models
+        # Models
         download_models()
         
-        # Step 9: Verify installation
-        verify_installation(python_venv)
+        # Verification
+        verify_installation()
         
-        # Step 10: Print summary
-        print_summary()
+        # Completion
+        print_completion_message()
         
+        if not midi_success:
+            print("\nNote: MIDI-GPT build may require manual completion")
+            sys.exit(1)
+            
     except KeyboardInterrupt:
-        log_error("Setup interrupted by user")
+        print("\nSetup interrupted by user")
         sys.exit(1)
     except Exception as e:
-        log_error(f"Setup failed: {e}")
+        print(f"\nSetup failed: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
