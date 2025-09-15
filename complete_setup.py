@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Composer's Assistant v2 - Complete Setup Script
-Automated setup for virtual environment, dependencies, MIDI-GPT, and REAPER integration
+Fixed version with proper NumPy constraint handling
 """
 
 import os
@@ -10,44 +10,49 @@ import subprocess
 import shutil
 import platform
 from pathlib import Path
-import urllib.request
-import zipfile
 
-# Configuration
 VENV_NAME = "venv"
 PYTHON_MIN_VERSION = (3, 9)
 MIDIGPT_REPO = "https://github.com/Metacreation-Lab/MIDI-GPT.git"
 
-def run_command(cmd, check=True, capture_output=False, cwd=None):
-    """Run a shell command with error handling"""
+def run_command(cmd, capture_output=False, cwd=None):
+    """Run command with proper error handling and shell escaping"""
     try:
-        result = subprocess.run(cmd, shell=True, check=check, 
-                              capture_output=capture_output, text=True, cwd=cwd)
+        if isinstance(cmd, str):
+            # For string commands, use shell=True but be careful with escaping
+            result = subprocess.run(cmd, shell=True, check=True, 
+                                  capture_output=capture_output, text=True, cwd=cwd)
+        else:
+            # For list commands, no shell needed
+            result = subprocess.run(cmd, check=True, 
+                                  capture_output=capture_output, text=True, cwd=cwd)
         return result
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {cmd}")
+        print(f"Error: {e}")
         if capture_output:
+            print(f"Output: {e.stdout}")
             print(f"Error: {e.stderr}")
-        sys.exit(1)
+        raise
 
 def check_python():
-    """Check if Python 3.9+ is available"""
+    """Check for compatible Python version"""
     print("Checking Python version...")
     
-    # Try different Python commands
-    for cmd in ["python3.9", "python3", "python"]:
+    python_commands = ["python3.9", "python3", "python"]
+    
+    for cmd in python_commands:
         try:
             result = run_command(f"{cmd} --version", capture_output=True)
             version_str = result.stdout.strip()
             
             # Extract version numbers
-            if "Python" in version_str:
-                version_parts = version_str.split()[1].split('.')
-                major, minor = int(version_parts[0]), int(version_parts[1])
+            version_parts = version_str.split()[-1].split('.')
+            major, minor = int(version_parts[0]), int(version_parts[1])
                 
-                if (major, minor) >= PYTHON_MIN_VERSION:
-                    print(f"Compatible Python found: {version_str}")
-                    return cmd
+            if (major, minor) >= PYTHON_MIN_VERSION:
+                print(f"Compatible Python found: {version_str}")
+                return cmd
         except:
             continue
     
@@ -82,50 +87,69 @@ def setup_venv(python_cmd):
 def get_pip_command():
     """Get pip command for the virtual environment"""
     if platform.system() == "Windows":
-        return f"{VENV_NAME}\\Scripts\\pip"
+        return Path(VENV_NAME) / "Scripts" / "pip"
     else:
-        return f"{VENV_NAME}/bin/pip"
+        return Path(VENV_NAME) / "bin" / "pip"
 
 def get_python_command():
     """Get Python command for the virtual environment"""
+    current_dir = Path.cwd()
     if platform.system() == "Windows":
-        return f".\\{VENV_NAME}\\Scripts\\python"
+        return str(current_dir / VENV_NAME / "Scripts" / "python")
     else:
-        return f"./{VENV_NAME}/bin/python"
+        return str(current_dir / VENV_NAME / "bin" / "python")
 
 def install_core_dependencies(has_cuda=False):
-    """Install core Python dependencies"""
-    pip_cmd = get_pip_command()
+    """Install core Python dependencies with proper constraint handling"""
+    pip_cmd = str(get_pip_command())
     
     print("Upgrading pip...")
-    run_command(f"{pip_cmd} install --upgrade pip setuptools wheel")
+    run_command([pip_cmd, "install", "--upgrade", "pip", "setuptools", "wheel"])
     
     print("Installing core dependencies...")
     
-    # Install PyTorch
+    # Install PyTorch - use list format to avoid shell parsing issues
     if has_cuda:
         print("Installing PyTorch with CUDA...")
-        torch_cmd = (f'{pip_cmd} install torch>=2.0.0 torchvision torchaudio '
-                    f'--index-url https://download.pytorch.org/whl/cu118')
+        run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio", 
+                    "--index-url", "https://download.pytorch.org/whl/cu118"])
     else:
         print("Installing CPU-only PyTorch...")
-        torch_cmd = (f'{pip_cmd} install torch>=2.0.0 torchvision torchaudio '
-                    f'--index-url https://download.pytorch.org/whl/cpu')
+        run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio",
+                    "--index-url", "https://download.pytorch.org/whl/cpu"])
     
-    run_command(torch_cmd)
-    
-    # Install other core dependencies
+    # Install other core dependencies - use list format to prevent shell interpretation of <>
     deps = [
-        'numpy>=1.21.0,<2.0',
-        'protobuf>=4.0.0', 
-        'pybind11[global]>=2.12.0',
-        'transformers>=4.30.0',
-        'cmake>=3.16.0',
-        'tqdm'
+        ("numpy", "numpy>=1.21.0,<2.0"),        # Critical: constraint NumPy to 1.x
+        ("protobuf", "protobuf>=4.0.0"), 
+        ("pybind11", "pybind11[global]>=2.12.0"),
+        ("transformers", "transformers>=4.30.0"),
+        ("cmake", "cmake>=3.16.0"),
+        ("tqdm", "tqdm")
     ]
     
-    for dep in deps:
-        run_command(f'{pip_cmd} install "{dep}"')
+    for name, constraint in deps:
+        print(f"Installing {constraint}...")
+        # Use list format instead of string to avoid shell parsing of < > symbols
+        run_command([pip_cmd, "install", constraint])
+
+def install_project_requirements():
+    """Install project-specific requirements"""
+    pip_cmd = str(get_pip_command())
+    
+    # Install MIDI libraries
+    midi_libs = ["mido>=1.1.16", "miditoolkit"]
+    
+    for lib in midi_libs:
+        print(f"Installing {lib}...")
+        run_command([pip_cmd, "install", lib])
+    
+    # Install other project requirements
+    other_libs = ["portion", "sentencepiece", "matplotlib"]
+    
+    for lib in other_libs:
+        print(f"Installing {lib}...")
+        run_command([pip_cmd, "install", lib])
 
 def clone_midi_gpt():
     """Clone MIDI-GPT repository from the python-3-9-refactor branch"""
@@ -136,14 +160,12 @@ def clone_midi_gpt():
             result = run_command("git branch --show-current", capture_output=True, cwd="MIDI-GPT")
             current_branch = result.stdout.strip()
             if current_branch != "python-3-9-refactor":
-                print(f"MIDI-GPT is on branch '{current_branch}', switching to 'python-3-9-refactor'...")
-                run_command("git fetch origin", cwd="MIDI-GPT")
+                print(f"Switching from {current_branch} to python-3-9-refactor branch...")
                 run_command("git checkout python-3-9-refactor", cwd="MIDI-GPT")
-                print("Switched to python-3-9-refactor branch")
             else:
                 print("Already on python-3-9-refactor branch")
         except:
-            print("Could not check/switch branch - manual intervention may be required")
+            print("Could not determine current branch, proceeding with existing repo")
         return
     
     print("Cloning MIDI-GPT repository (python-3-9-refactor branch)...")
@@ -151,101 +173,44 @@ def clone_midi_gpt():
     print("MIDI-GPT repository cloned from python-3-9-refactor branch")
 
 def build_midi_gpt():
-    """Build MIDI-GPT using setup_midigpt.py with --install flag for automatic environment installation"""
-    if not Path("MIDI-GPT").exists():
-        print("MIDI-GPT repository not found")
-        return False
-    
-    # Check if setup_midigpt.py exists
-    setup_script = Path("MIDI-GPT/setup_midigpt.py")
-    if not setup_script.exists():
-        print("setup_midigpt.py not found in MIDI-GPT directory")
-        print("This usually means the wrong branch was cloned.")
-        print("Expected branch: python-3-9-refactor")
-        print("\nTry manually:")
-        print("  cd MIDI-GPT")
-        print("  git fetch origin")
-        print("  git checkout python-3-9-refactor")
-        return False
-    
+    """Build and install MIDI-GPT using the --install flag"""
     print("Building and installing MIDI-GPT...")
     
-    # Get absolute path to virtual environment python
-    current_dir = Path.cwd()
-    venv_python_path = current_dir / VENV_NAME / "bin" / "python"
-    if platform.system() == "Windows":
-        venv_python_path = current_dir / VENV_NAME / "Scripts" / "python.exe"
-    
-    if not venv_python_path.exists():
-        print(f"Virtual environment Python not found: {venv_python_path}")
-        print("Try activating the virtual environment first:")
-        print(f"  source {VENV_NAME}/bin/activate")
+    if not Path("MIDI-GPT").exists():
+        print("MIDI-GPT directory not found")
         return False
     
-    # Use the --install flag to automatically install to current environment
-    build_flags = ["--install", "--test"]
-    if platform.system() == "Darwin":
-        build_flags.append("--mac-os")
-    
-    build_cmd = f"{venv_python_path} setup_midigpt.py {' '.join(build_flags)}"
+    python_cmd = str(get_python_command())
     
     try:
-        run_command(build_cmd, cwd="MIDI-GPT")
+        # Use the new --install flag for direct installation to venv
+        if platform.system() == "Darwin":  # macOS
+            run_command([python_cmd, "setup_midigpt.py", "--install", "--mac-os", "--test"], 
+                       cwd="MIDI-GPT")
+        else:
+            run_command([python_cmd, "setup_midigpt.py", "--install", "--test"], 
+                       cwd="MIDI-GPT")
+        
         print("MIDI-GPT built and installed successfully")
         return True
-    except:
-        print("MIDI-GPT build with --install failed")
-        print("Trying fallback without --install flag...")
         
-        # Fallback to build-only approach
-        fallback_flags = ["--test"]
-        if platform.system() == "Darwin":
-            fallback_flags.append("--mac-os")
-        
-        fallback_cmd = f"{venv_python_path} setup_midigpt.py {' '.join(fallback_flags)}"
-        
-        try:
-            run_command(fallback_cmd, cwd="MIDI-GPT")
-            print("MIDI-GPT built successfully (manual path setup required)")
-            return True
-        except:
-            print("Both build attempts failed")
-            print("Manual completion required:")
-            print(f"  source {VENV_NAME}/bin/activate")
-            print(f"  cd MIDI-GPT && python setup_midigpt.py --install --test")
-            return False
-
-def find_reaper_path():
-    """Find REAPER resources directory"""
-    system = platform.system()
-    
-    if system == "Darwin":  # macOS
-        paths = [
-            Path.home() / "Library/Application Support/REAPER",
-            "/Library/Application Support/REAPER"
-        ]
-    elif system == "Windows":
-        paths = [
-            Path.home() / "AppData/Roaming/REAPER",
-            Path("C:/Program Files/REAPER/InstallData")
-        ]
-    else:  # Linux
-        paths = [
-            Path.home() / ".config/REAPER",
-            Path("/opt/REAPER")
-        ]
-    
-    for path in paths:
-        if path.exists():
-            return path
-    
-    return None
+    except Exception as e:
+        print(f"MIDI-GPT build failed: {e}")
+        print("You may need to complete this manually:")
+        print(f"  cd MIDI-GPT && {python_cmd} setup_midigpt.py --install --test")
+        return False
 
 def setup_reaper_integration():
-    """Setup REAPER symlinks"""
-    reaper_path = find_reaper_path()
-    if not reaper_path:
-        print("REAPER installation not found - skipping integration")
+    """Setup REAPER integration"""
+    if platform.system() == "Darwin":  # macOS
+        reaper_path = Path.home() / "Library/Application Support/REAPER"
+    elif platform.system() == "Windows":
+        reaper_path = Path.home() / "AppData/Roaming/REAPER"
+    else:  # Linux
+        reaper_path = Path.home() / ".config/REAPER"
+    
+    if not reaper_path.exists():
+        print(f"REAPER not found at {reaper_path}")
         return
     
     print(f"Setting up REAPER integration at: {reaper_path}")
@@ -290,17 +255,7 @@ def verify_installation():
     print("\nVerifying installation...")
     
     # Get absolute path to virtual environment python
-    current_dir = Path.cwd()
-    venv_python_path = current_dir / VENV_NAME / "bin" / "python"
-    if platform.system() == "Windows":
-        venv_python_path = current_dir / VENV_NAME / "Scripts" / "python.exe"
-    
-    if not venv_python_path.exists():
-        print(f"Virtual environment Python not found: {venv_python_path}")
-        print("Using fallback system python for verification")
-        python_cmd = "python"
-    else:
-        python_cmd = str(venv_python_path)
+    python_cmd = str(get_python_command())
     
     # Test core imports
     test_imports = [
@@ -311,7 +266,7 @@ def verify_installation():
     
     for test_cmd, name in test_imports:
         try:
-            run_command(f'{python_cmd} -c "{test_cmd}"', capture_output=True)
+            run_command([python_cmd, "-c", test_cmd], capture_output=True)
             print(f"  ✓ {name}")
         except:
             print(f"  ✗ {name}")
@@ -319,13 +274,14 @@ def verify_installation():
     # Test MIDI-GPT import
     try:
         # With --install flag, midigpt should be directly importable
-        run_command(f'{python_cmd} -c "import midigpt; print(\\"MIDI-GPT: Ready\\")"', capture_output=True)
+        run_command([python_cmd, "-c", "import midigpt; print('MIDI-GPT: Ready')"], 
+                   capture_output=True)
         print("  ✓ MIDI-GPT import (installed)")
     except:
         # Fallback to path-based import
         try:
-            midi_test_cmd = f'{python_cmd} -c "import sys; sys.path.append(\\"MIDI-GPT/python_lib\\"); import midigpt; print(\\"MIDI-GPT: Ready\\")"'
-            run_command(midi_test_cmd, capture_output=True)
+            midi_test_cmd = 'import sys; sys.path.append("MIDI-GPT/python_lib"); import midigpt; print("MIDI-GPT: Ready")'
+            run_command([python_cmd, "-c", midi_test_cmd], capture_output=True)
             print("  ✓ MIDI-GPT import (path-based)")
         except:
             print("  ✗ MIDI-GPT import - requires manual completion")
@@ -341,7 +297,7 @@ def print_completion_message():
     print("="*50)
     print(f"\nTo activate the environment: {activate_cmd}")
     print("\nNext steps:")
-    print("1. Start the server: python start_unified.py start")
+    print("1. Start the server: python start_server.py start")
     print("2. Open REAPER and load Composer's Assistant scripts")
     print("3. Begin composing with AI assistance!")
     
@@ -354,9 +310,7 @@ def print_completion_message():
     print(f"\nTo verify your virtual environment is working:")
     print(f"  {activate_cmd}")
     print(f"  python -c \"import sys; print(sys.executable)\"")
-    print(f"  python -c \"import transformers; print('Transformers OK')\"")
-
-
+    print(f"  python -c \"import numpy; print('NumPy:', numpy.__version__)\"")
 
 def main():
     print("Composer's Assistant v2 - Complete Setup")
@@ -370,6 +324,7 @@ def main():
         
         # Dependencies
         install_core_dependencies(has_cuda)
+        install_project_requirements()
         
         # MIDI-GPT integration
         clone_midi_gpt()

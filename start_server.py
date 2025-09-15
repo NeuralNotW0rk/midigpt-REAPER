@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Unified Server Management - Single server design
+Server Management Script - Handles all environment setup and server launching
+All venv integration and environment logic happens here
 """
 
 import subprocess
@@ -9,6 +10,8 @@ import sys
 import time
 import os
 import socket
+import platform
+from pathlib import Path
 
 server_process = None
 
@@ -30,23 +33,99 @@ def find_script(filename):
     return None
 
 def get_python_executable():
-    """Get the correct Python executable (3.9+)"""
-    # Try .venv first (preferred)
-    venv_paths = [
-        os.path.join('.venv', 'bin', 'python'),      # Unix/Mac
-        os.path.join('.venv', 'Scripts', 'python.exe'), # Windows
-        os.path.join('.venv', 'Scripts', 'python'),     # Windows alt
+    """Get the correct Python executable from venv - all venv logic here"""
+    current_dir = Path.cwd()
+    
+    print(f"Looking for venv in: {current_dir}")
+    
+    # Priority order: venv, .venv (legacy), system
+    if platform.system() == "Windows":
+        venv_paths = [
+            current_dir / "venv" / "Scripts" / "python.exe",      # New standard
+            current_dir / "venv" / "Scripts" / "python",
+            current_dir / ".venv" / "Scripts" / "python.exe",    # Legacy
+            current_dir / ".venv" / "Scripts" / "python",
+        ]
+    else:
+        venv_paths = [
+            current_dir / "venv" / "bin" / "python",             # New standard
+            current_dir / ".venv" / "bin" / "python",            # Legacy
+        ]
+    
+    # Debug: show what we're checking
+    for venv_path in venv_paths:
+        exists = venv_path.exists()
+        print(f"Checking {venv_path}: {'EXISTS' if exists else 'NOT FOUND'}")
+        if exists:
+            # CRITICAL: Return the actual venv path, not the resolved system path
+            abs_path = str(venv_path.absolute())  # Use .absolute() not .resolve()
+            
+            # Double check this is actually in our venv directory
+            if str(current_dir) in abs_path and ("venv" in abs_path or ".venv" in abs_path):
+                print(f"Using project venv Python: {abs_path}")
+                return abs_path
+            else:
+                print(f"Warning: {venv_path} does not appear to be in project venv")
+    
+    # Check if venv directories exist but python is missing
+    for venv_name in ["venv", ".venv"]:
+        venv_dir = current_dir / venv_name
+        if venv_dir.exists():
+            print(f"Found {venv_name} directory but no proper python executable inside")
+            if platform.system() == "Windows":
+                print(f"  Expected: {venv_dir}/Scripts/python.exe")
+            else:
+                print(f"  Expected: {venv_dir}/bin/python")
+    
+    # Fallback to system Python
+    print("No virtual environment found - using system Python")
+    print("Run 'python complete_setup.py' to create the virtual environment")
+    return sys.executable
+
+def setup_python_environment():
+    """Setup Python environment with all necessary paths"""
+    python_executable = get_python_executable()
+    
+    # Setup environment variables for the subprocess
+    env = os.environ.copy()
+    
+    # Add MIDI-GPT paths if they exist - all path logic here
+    possible_midigpt_paths = [
+        "MIDI-GPT/python_lib",
+        "midigpt_workspace/MIDI-GPT/python_lib",
+        "../MIDI-GPT/python_lib",
+        "../../MIDI-GPT/python_lib",
     ]
     
-    for venv_path in venv_paths:
-        if os.path.exists(venv_path):
-            abs_path = os.path.abspath(venv_path)
-            print(f"Using project venv Python: {abs_path}")
-            return abs_path
+    python_paths = []
+    for path in possible_midigpt_paths:
+        if os.path.exists(path):
+            abs_path = os.path.abspath(path)
+            python_paths.append(abs_path)
     
-    # Fallback to system Python (should be 3.9+ since midigpt is now compatible)
-    print("Using system Python (ensure it's 3.9+)")
-    return sys.executable
+    if python_paths:
+        existing_path = env.get('PYTHONPATH', '')
+        if existing_path:
+            python_paths.append(existing_path)
+        env['PYTHONPATH'] = os.pathsep.join(python_paths)
+        print(f"Set PYTHONPATH to include: {python_paths[0]}")
+    
+    return python_executable, env
+
+def get_server_script():
+    """Find the correct server script"""
+    possible_scripts = [
+        'midigpt_server.py',                  # Primary midigpt server
+        'composers_assistant_nn_server.py'    # Fallback to CA server
+    ]
+    
+    for script in possible_scripts:
+        script_path = find_script(script)
+        if script_path:
+            print(f"Found server script: {script_path}")
+            return script_path
+    
+    return None
 
 def setup_signal_handlers():
     """Setup signal handlers for clean shutdown"""
@@ -59,156 +138,146 @@ def setup_signal_handlers():
     signal.signal(signal.SIGTERM, signal_handler)
 
 def start_server():
-    """Start the unified MidiGPT-REAPER server"""
+    """Start the server with proper environment setup"""
     global server_process
     
-    script_path = find_script('unified_midigpt_reaper_server.py')
+    script_path = get_server_script()
     if not script_path:
-        print("ERROR: unified_midigpt_reaper_server.py not found")
+        print("ERROR: No server script found")
+        print("Looking for: midigpt_server.py or composers_assistant_nn_server.py")
         return False
     
-    python_executable = get_python_executable()
+    # Setup environment - all venv logic happens here
+    python_executable, env = setup_python_environment()
+    
+    # Fix path doubling issue - use absolute path for script
+    script_abs_path = os.path.abspath(script_path)
+    script_dir = os.path.dirname(script_abs_path)
     
     try:
-        print(f"Starting unified server: {script_path}")
+        print(f"Starting server: {script_path}")
+        print(f"Absolute path: {script_abs_path}")
+        print(f"Working directory: {script_dir}")
+        print(f"Command: {python_executable} {os.path.basename(script_abs_path)}")
+        
         server_process = subprocess.Popen(
-            [python_executable, script_path],
-            cwd=os.path.dirname(script_path) if os.path.dirname(script_path) else '.',
+            [python_executable, os.path.basename(script_abs_path)],
+            cwd=script_dir,  # Run from script directory to avoid path issues
+            env=env,  # Pass environment with PYTHONPATH set
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            universal_newlines=True,
+            text=True,
             bufsize=1
         )
         
-        # Monitor output for startup confirmation
-        startup_timeout = 10
-        start_time = time.time()
+        # Give server time to start and capture initial output
+        time.sleep(3)
         
-        while time.time() - start_time < startup_timeout:
-            if server_process.poll() is not None:
-                output, _ = server_process.communicate()
-                print(f"Server failed to start:\n{output}")
-                return False
-            
-            time.sleep(0.1)
-            
-            # Check if port is ready
-            if check_port(3456):
-                print("✅ Unified server started successfully")
-                return True
-        
-        print("⚠️  Server may have started but port not ready within timeout")
-        return True
-        
-    except Exception as e:
-        print(f"ERROR starting server: {e}")
-        return False
-
-def check_port(port, service_name="server"):
-    """Check if a port is accessible"""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(1)
-        result = sock.connect_ex(('127.0.0.1', port))
-        sock.close()
-        
-        if result == 0:
-            print(f"{service_name}: port {port} accessible")
+        # Check if process is still running and get any output
+        if server_process.poll() is None:
+            print("Server started successfully")
             return True
         else:
-            print(f"{service_name}: port {port} not accessible")
+            print("Server failed to start")
+            # Get any error output
+            try:
+                output, _ = server_process.communicate(timeout=1)
+                if output:
+                    print("Server output:")
+                    print(output)
+            except subprocess.TimeoutExpired:
+                pass
             return False
+            
     except Exception as e:
-        print(f"Error checking port {port}: {e}")
+        print(f"Failed to start server: {e}")
         return False
 
 def stop_server():
-    """Stop the running server"""
+    """Stop the server gracefully"""
     global server_process
     
-    if server_process:
+    if server_process is None:
+        print("Server not running")
+        return True
+    
+    if server_process.poll() is not None:
+        print("Server already stopped")
+        server_process = None
+        return True
+    
+    print("Stopping server...")
+    try:
+        server_process.terminate()
         try:
-            print("Stopping unified server...")
-            server_process.terminate()
-            
-            # Wait for graceful shutdown
-            try:
-                server_process.wait(timeout=5)
-                print("Server stopped gracefully")
-            except subprocess.TimeoutExpired:
-                print("Server didn't stop gracefully, force killing...")
-                server_process.kill()
-                server_process.wait()
-                print("Server force killed")
-                
-        except Exception as e:
-            print(f"ERROR stopping server: {e}")
-        finally:
-            server_process = None
+            server_process.wait(timeout=5)
+            print("Server stopped gracefully")
+        except subprocess.TimeoutExpired:
+            print("Server didn't stop gracefully, forcing...")
+            server_process.kill()
+            server_process.wait()
+            print("Server force stopped")
+    except Exception as e:
+        print(f"Error stopping server: {e}")
+        return False
+    
+    server_process = None
+    return True
+
+def check_port(port):
+    """Check if a port is in use"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        result = sock.connect_ex(('localhost', port))
+        return result == 0
 
 def get_server_status():
-    """Get status of the server"""
+    """Get the current server status"""
     global server_process
     
-    if server_process and server_process.poll() is None:
-        if check_port(3456, "XML-RPC"):
-            return "running"
-        else:
-            return "started but not responding"
-    else:
+    if server_process is None:
         return "stopped"
+    
+    if server_process.poll() is None:
+        return "running"
+    else:
+        return "crashed"
 
 def verify_environment():
-    """Verify that the environment is set up correctly"""
+    """Verify environment setup - all verification logic here"""
     print("Verifying environment...")
     
-    python_executable = get_python_executable()
+    python_executable, env = setup_python_environment()
     
     # Check Python version
     try:
         result = subprocess.run([python_executable, '--version'], 
-                              capture_output=True, text=True)
-        python_version = result.stdout.strip()
-        print(f"Python version: {python_version}")
+                              capture_output=True, text=True, env=env)
+        print(f"Python version: {result.stdout.strip()}")
         
-        # Check if it's 3.9+
-        version_parts = python_version.split()[1].split('.')
-        major, minor = int(version_parts[0]), int(version_parts[1])
-        
+        # Parse version to ensure it's 3.9+
+        version_str = result.stdout.strip().split()[-1]
+        major, minor = map(int, version_str.split('.')[:2])
         if major == 3 and minor >= 9:
             print("✅ Python version compatible")
         else:
-            print(f"⚠️  Python version may be incompatible (need 3.9+)")
-            
+            print("⚠️ Python version may be incompatible (need 3.9+)")
     except Exception as e:
-        print(f"Could not verify Python version: {e}")
+        print(f"⚠️ Could not verify Python version: {e}")
     
-    # Check for MIDI-GPT repo
-    midigpt_paths = [
-        "MIDI-GPT",
-        "MIDI-GPT/python_lib",
-        os.path.join("MIDI-GPT", "models")
-    ]
-    
-    midigpt_found = False
-    for path in midigpt_paths:
-        if os.path.exists(path):
-            print(f"✅ Found MIDI-GPT component: {path}")
-            midigpt_found = True
+    # Check for MIDI-GPT components
+    midigpt_dirs = ['MIDI-GPT', 'MIDI-GPT/python_lib', 'MIDI-GPT/models']
+    for dir_name in midigpt_dirs:
+        if os.path.exists(dir_name):
+            print(f"✅ Found MIDI-GPT component: {dir_name}")
         else:
-            print(f"⚠️  MIDI-GPT component not found: {path}")
+            print(f"⚠️ Missing MIDI-GPT component: {dir_name}")
     
-    if not midigpt_found:
-        print("⚠️  MIDI-GPT repository not found - clone it to project root")
-    
-    # Check for required libraries
-    required_libs = ['mido', 'miditoolkit']  # One of these
+    # Check for MIDI libraries
     available_libs = []
-    
-    for lib in required_libs:
+    for lib in ['mido', 'miditoolkit']:
         try:
-            result = subprocess.run([python_executable, '-c', f'import {lib}; print("{lib} available")'],
-                                  capture_output=True, text=True)
+            result = subprocess.run([python_executable, '-c', f'import {lib}'],
+                                  capture_output=True, text=True, env=env)
             if result.returncode == 0:
                 available_libs.append(lib)
         except:
@@ -219,14 +288,22 @@ def verify_environment():
     else:
         print("⚠️  No MIDI libraries found - install mido or miditoolkit")
     
-    # Check for midigpt (if available)
+    # Check for midigpt - test both direct and path-based import
     try:
+        # Try direct import first (--install flag)
         result = subprocess.run([python_executable, '-c', 'import midigpt; print("midigpt available")'],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=env)
         if result.returncode == 0:
             print("✅ midigpt library available")
         else:
-            print("⚠️  midigpt library not available (will use fallback mode)")
+            # Try path-based import
+            test_cmd = 'import sys; sys.path.append("MIDI-GPT/python_lib"); import midigpt; print("midigpt available")'
+            result = subprocess.run([python_executable, '-c', test_cmd],
+                                  capture_output=True, text=True, env=env)
+            if result.returncode == 0:
+                print("✅ midigpt library available (path-based)")
+            else:
+                print("⚠️  midigpt library not available (will use fallback mode)")
     except:
         print("⚠️  midigpt library not available (will use fallback mode)")
     
@@ -256,12 +333,12 @@ def main():
     if len(sys.argv) < 2:
         print("MidiGPT-REAPER Server Management")
         print("\nUsage:")
-        print("  python start_midigpt.py start     # Start server")
-        print("  python start_midigpt.py stop      # Stop server")  
-        print("  python start_midigpt.py status    # Check server status")
-        print("  python start_midigpt.py verify    # Verify environment")
-        print("  python start_midigpt.py logs      # Show live logs")
-        print("  python start_midigpt.py restart   # Restart server")
+        print("  python start_server.py start     # Start server")
+        print("  python start_server.py stop      # Stop server")  
+        print("  python start_server.py status    # Check server status")
+        print("  python start_server.py verify    # Verify environment")
+        print("  python start_server.py logs      # Show live logs")
+        print("  python start_server.py restart   # Restart server")
         return
     
     command = sys.argv[1].lower()
@@ -281,14 +358,10 @@ def main():
         # Keep running and monitor
         try:
             print("\nServer running. Press Ctrl+C to stop.")
-            while True:
-                status = get_server_status()
-                if status == "stopped":
-                    print("Server stopped unexpectedly")
-                    break
-                time.sleep(5)
+            while server_process and server_process.poll() is None:
+                time.sleep(1)
         except KeyboardInterrupt:
-            print("\nShutdown requested")
+            print("\nShutting down...")
         finally:
             stop_server()
     
@@ -297,10 +370,9 @@ def main():
     
     elif command == "status":
         status = get_server_status()
+        port_status = "in use" if check_port(3456) else "free"
         print(f"Server status: {status}")
-        
-        if status == "running":
-            check_port(3456, "XML-RPC endpoint")
+        print(f"Port 3456: {port_status}")
     
     elif command == "verify":
         verify_environment()
@@ -311,12 +383,16 @@ def main():
     elif command == "restart":
         print("Restarting server...")
         stop_server()
-        time.sleep(2)
-        
+        time.sleep(1)
         if start_server():
-            print("Server restarted successfully")
-        else:
-            print("Failed to restart server")
+            try:
+                print("\nServer restarted. Press Ctrl+C to stop.")
+                while server_process and server_process.poll() is None:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                print("\nShutting down...")
+            finally:
+                stop_server()
     
     else:
         print(f"Unknown command: {command}")
