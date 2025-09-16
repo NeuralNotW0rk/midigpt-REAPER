@@ -1,632 +1,387 @@
 #!/usr/bin/env python3
 """
-Complete MidiGPT Server with MIDI File Conversion
-Converts REAPER string data to MIDI files for MidiGPT processing
+Production MidiGPT Server for REAPER Integration
+Converts REAPER CA format to MidiGPT and back for AI music generation
 """
 
 import os
 import re
-import uuid
-import tempfile
-import time
+from xmlrpc.server import SimpleXMLRPCServer
+import socketserver
 from pathlib import Path
-from typing import List, Dict, Optional
-import json
 
-# Server setup
 DEBUG = True
-MAX_NN_LENGTH = 1024
-DEVICE = "cpu"  # or "cuda" if available
 
-# Check for MIDI library availability
-try:
-    import mido
-    USE_MIDO = True
-    MIDI_LIB_AVAILABLE = True
-    print("Using mido for MIDI file creation")
-except ImportError:
-    try:
-        import miditoolkit
-        USE_MIDO = False
-        MIDI_LIB_AVAILABLE = True
-        print("Using miditoolkit for MIDI file creation")
-    except ImportError:
-        MIDI_LIB_AVAILABLE = False
-        print("WARNING: No MIDI library available - install mido or miditoolkit")
-
-# Check for MidiGPT availability
-try:
-    import sys
-    sys.path.append('MIDI-GPT/python_lib')
-    import midigpt
-    MIDIGPT_AVAILABLE = True
-    print("MidiGPT library available")
-except ImportError:
-    MIDIGPT_AVAILABLE = False
-    print("MidiGPT library not available - using fallback mode")
-
-# Create temp directory for MIDI files
-TEMP_MIDI_DIR = Path(tempfile.gettempdir()) / "midigpt_temp"
-TEMP_MIDI_DIR.mkdir(exist_ok=True)
-
-# Cache for avoiding repeated requests
-LAST_CALL = ''
-LAST_OUTPUTS = set()
-
-def normalize_requests(input_s: str) -> str:
-    """Normalize input for caching - same as CA server"""
-    def norm_extra_id(s):
-        first_loc = s.find('<extra_id_')
-        if first_loc != -1:
-            second_loc = s.find('>', first_loc)
-            s = s[:first_loc] + '<e>' + s[second_loc + 1:]
-            return norm_extra_id(s)
-        return s
-
-    def norm_measure(s):
-        first_loc = s.find(';M:')
-        if first_loc != -1:
-            second_loc = s.find(';', first_loc + 1)
-            if second_loc == -1:
-                s = s[:first_loc] + '<M>'
-            else:
-                s = s[:first_loc] + '<M>' + s[second_loc:]
-            return norm_measure(s)
-        return s
-
-    return norm_measure(norm_extra_id(input_s))
-
-def extract_extra_ids_from_input(s: str) -> List[int]:
-    """Extract extra_id tokens from input string"""
-    extra_ids = []
-    pattern = r'<extra_id_(\d+)>'
+def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
+                   has_fully_masked_inst=False, temperature=1.0):
+    """
+    MidiGPT inference function - matches REAPER script signature exactly
+    """
     
-    for match in re.finditer(pattern, s):
-        extra_id = int(match.group(1))
-        extra_ids.append(extra_id)
-    
-    return sorted(list(set(extra_ids)))
-
-def parse_ca_notes_to_midi_events(input_string: str) -> List[Dict]:
-    """Parse CA-format string to MIDI events with timing"""
-    events = []
-    current_time = 0
-    current_duration = 480  # Default duration in ticks
-    
-    # Parse the input string token by token
-    tokens = input_string.split(';')
-    
-    for token in tokens:
-        token = token.strip()
-        if not token:
-            continue
-            
-        if token.startswith('N:'):
-            # Note instruction: N:pitch
-            try:
-                pitch = int(token.split(':')[1])
-                events.append({
-                    'type': 'note_on',
-                    'time': current_time,
-                    'pitch': pitch,
-                    'velocity': 80
-                })
-                events.append({
-                    'type': 'note_off',
-                    'time': current_time + current_duration,
-                    'pitch': pitch,
-                    'velocity': 0
-                })
-            except (ValueError, IndexError):
-                continue
-                
-        elif token.startswith('d:'):
-            # Duration instruction: d:duration_in_ticks
-            try:
-                current_duration = int(token.split(':')[1])
-            except (ValueError, IndexError):
-                continue
-                
-        elif token.startswith('w:'):
-            # Wait instruction: w:wait_time_in_ticks
-            try:
-                wait_time = int(token.split(':')[1])
-                current_time += wait_time
-            except (ValueError, IndexError):
-                continue
-                
-        elif token.startswith('M:'):
-            # Measure marker - can be used for timing
-            continue
-            
-        elif token.startswith('<extra_id_'):
-            # Extra ID token - skip for now
-            continue
-    
-    return events
-
-def create_midi_file_from_ca_string(input_string: str) -> Optional[str]:
-    """Create a MIDI file from CA-format string data"""
-    if not MIDI_LIB_AVAILABLE:
-        print("ERROR: No MIDI library available")
-        return None
-    
-    # Generate unique filename
-    file_id = str(uuid.uuid4())[:8]
-    midi_file_path = TEMP_MIDI_DIR / f"ca_input_{file_id}.mid"
+    if DEBUG:
+        print(f"\n🎵 MidiGPT call_nn_infill called")
+        print(f"Input: {len(s)} chars, temp={temperature}")
     
     try:
-        # Parse events from CA string
-        events = parse_ca_notes_to_midi_events(input_string)
+        # Step 1: Handle S parameter conversion
+        if hasattr(S, 'keys'):  # It's a dictionary
+            try:
+                import preprocessing_functions as pre
+                S_converted = pre.midisongbymeasure_from_save_dict(S)
+                S = S_converted
+                if DEBUG:
+                    print("✅ Converted S parameter")
+            except Exception as e:
+                print(f"Warning: Could not convert S parameter: {e}")
         
-        if not events:
-            # Create minimal context MIDI if no notes found
-            print("No notes found in input, creating minimal context MIDI")
-            return create_minimal_context_midi(str(midi_file_path))
+        # Step 2: Extract extra IDs from input string
+        extra_id_matches = re.findall(r'<extra_id_(\d+)>', s)
+        extra_ids = [int(match) for match in extra_id_matches]
         
-        if USE_MIDO:
-            # Create MIDI file using mido
-            mid = mido.MidiFile(ticks_per_beat=480)
-            track = mido.MidiTrack()
-            mid.tracks.append(track)
-            
-            # Sort events by time
-            events.sort(key=lambda x: x['time'])
-            
-            last_time = 0
-            for event in events:
-                delta_time = event['time'] - last_time
-                
-                if event['type'] == 'note_on':
-                    msg = mido.Message('note_on',
-                                     channel=0,
-                                     note=event['pitch'],
-                                     velocity=event['velocity'],
-                                     time=delta_time)
-                elif event['type'] == 'note_off':
-                    msg = mido.Message('note_off',
-                                     channel=0,
-                                     note=event['pitch'],
-                                     velocity=0,
-                                     time=delta_time)
-                else:
-                    continue
-                
-                track.append(msg)
-                last_time = event['time']
-            
-            mid.save(str(midi_file_path))
-            
+        if len(extra_ids) == 0:
+            extra_ids = [0]  # Default fallback
+        
+        if DEBUG:
+            print(f"Found extra IDs: {extra_ids}")
+        
+        # Step 3: Check for MidiGPT availability
+        midigpt_available = False
+        try:
+            import sys
+            sys.path.append('MIDI-GPT/python_lib')
+            import midigpt
+            midigpt_available = True
+            if DEBUG:
+                print("✅ MidiGPT library available")
+        except ImportError as e:
+            print(f"MidiGPT library not available: {e}")
+        
+        # Step 4: Check for MIDI library
+        midi_lib_available = False
+        try:
+            import mido
+            midi_lib_available = True
+            if DEBUG:
+                print("✅ Mido library available")
+        except ImportError:
+            try:
+                import miditoolkit
+                midi_lib_available = True
+                if DEBUG:
+                    print("✅ Miditoolkit library available")
+            except ImportError:
+                print("No MIDI library available")
+        
+        # Step 5: Generate response
+        if midigpt_available and midi_lib_available:
+            if DEBUG:
+                print("🚀 Using MidiGPT generation")
+            result = attempt_midigpt_generation(s, S, extra_ids, temperature, min_length)
         else:
-            # Create MIDI file using miditoolkit
-            mid = miditoolkit.MidiFile(ticks_per_beat=480)
-            instrument = miditoolkit.Instrument(program=0, is_drum=False)
-            
-            # Convert events to notes
-            note_ons = {}
-            for event in events:
-                if event['type'] == 'note_on':
-                    note_ons[event['pitch']] = event
-                elif event['type'] == 'note_off' and event['pitch'] in note_ons:
-                    note_on = note_ons.pop(event['pitch'])
-                    note = miditoolkit.Note(
-                        velocity=note_on['velocity'],
-                        pitch=event['pitch'],
-                        start=note_on['time'],
-                        end=event['time']
-                    )
-                    instrument.notes.append(note)
-            
-            mid.instruments.append(instrument)
-            mid.dump(str(midi_file_path))
+            if DEBUG:
+                print("🔄 Using fallback generation")
+            result = generate_enhanced_fallback(s, extra_ids, temperature)
         
-        print(f"Created MIDI file: {midi_file_path} ({len(events)} events)")
-        return str(midi_file_path)
+        if DEBUG:
+            print(f"✅ Generated result: {len(result)} chars")
+        
+        return result
         
     except Exception as e:
-        print(f"Error creating MIDI file: {e}")
-        return None
+        print(f"❌ Error in call_nn_infill: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Emergency fallback
+        try:
+            return generate_simple_fallback(s, extra_ids)
+        except:
+            return "<extra_id_0>N:60;d:240;w:240"
 
-def create_minimal_context_midi(output_path: str) -> str:
-    """Create a minimal context MIDI file for infilling"""
-    if not MIDI_LIB_AVAILABLE:
-        return None
+def attempt_midigpt_generation(input_string, S, extra_ids, temperature, min_length):
+    """Attempt actual MidiGPT generation"""
     
     try:
-        if USE_MIDO:
-            mid = mido.MidiFile(ticks_per_beat=480)
-            track = mido.MidiTrack()
-            mid.tracks.append(track)
-            
-            # Add a simple note for context
-            track.append(mido.Message('note_on', channel=0, note=60, velocity=80, time=0))
-            track.append(mido.Message('note_off', channel=0, note=60, velocity=0, time=480))
-            
-            mid.save(output_path)
+        import midigpt
+        import json
+        import tempfile
+        import uuid
+        from pathlib import Path
+        
+        # Create temp directory
+        temp_dir = Path(tempfile.gettempdir()) / "midigpt_temp"
+        temp_dir.mkdir(exist_ok=True)
+        
+        # Check if this is an infill request (no existing notes)
+        has_actual_notes = bool(re.search(r'N:\d+', input_string))
+        
+        if not has_actual_notes:
+            if DEBUG:
+                print("🎯 Infill generation")
+            return handle_infill_generation(input_string, S, extra_ids, temperature, min_length, temp_dir)
         else:
-            mid = miditoolkit.MidiFile(ticks_per_beat=480)
-            instrument = miditoolkit.Instrument(program=0, is_drum=False)
+            if DEBUG:
+                print("🎵 Continuation generation")
+            return handle_continuation_generation(input_string, S, extra_ids, temperature, min_length, temp_dir)
             
-            note = miditoolkit.Note(velocity=80, pitch=60, start=0, end=480)
-            instrument.notes.append(note)
-            
-            mid.instruments.append(instrument)
-            mid.dump(output_path)
-        
-        print(f"Created minimal context MIDI: {output_path}")
-        return output_path
-        
     except Exception as e:
-        print(f"Error creating minimal MIDI: {e}")
-        return None
+        print(f"Error in MidiGPT generation: {e}")
+        return generate_enhanced_fallback(input_string, extra_ids, temperature)
 
-def process_with_midigpt(midi_file_path: str, extra_ids: List[int], params: Dict) -> str:
-    """Process MIDI file with MidiGPT using correct API"""
-    if not MIDIGPT_AVAILABLE:
-        print("MidiGPT not available, using fallback")
-        return generate_fallback_content(extra_ids)
+def handle_infill_generation(input_string, S, extra_ids, temperature, min_length, temp_dir):
+    """Handle infill generation where we need to create content from scratch"""
     
     try:
-        print(f"Processing with MidiGPT: {midi_file_path}")
+        import midigpt
+        import json
+        import uuid
         
-        # Check for model checkpoint - paths relative to Scripts/composers_assistant_v2
-        possible_model_paths = [
-            "../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-            "../../MIDI-GPT/models/model.pt",
-            "../../MIDI-GPT/models/model.zip",
-            "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-            "MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",  # In case run from project root
-            "./EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt"  # In case copied to current dir
-        ]
+        # Step 1: Create minimal MIDI structure for infill
+        midi_file_path = create_minimal_midi_structure(temp_dir, len(extra_ids))
         
-        model_path = None
-        print("Searching for model checkpoint...")
-        for path in possible_model_paths:
-            abs_path = os.path.abspath(path)
-            exists = os.path.exists(path)
-            print(f"  Checking: {path} -> {abs_path} {'✅' if exists else '❌'}")
-            if exists:
-                model_path = path
-                print(f"Found model at: {model_path}")
-                break
-        
+        # Step 2: Find model
+        model_path = find_midigpt_model()
         if not model_path:
-            print(f"❌ No model found at any of the checked locations.")
-            print(f"Current working directory: {os.getcwd()}")
-            print("Using fallback mode")
-            return generate_fallback_content(extra_ids)
+            return generate_enhanced_fallback(input_string, extra_ids, temperature)
         
-        # Create MidiGPT encoder
+        # Step 3: Convert to JSON
         encoder = midigpt.ExpressiveEncoder()
-        
-        # Convert MIDI to JSON format
         midi_json_str = encoder.midi_to_json(midi_file_path)
         midi_data = json.loads(midi_json_str)
         
-        print(f"Converted MIDI to JSON: {len(midi_json_str)} chars")
+        # Step 4: Configure for infill generation
+        num_bars = max(4, len(extra_ids))
+        selected_bars = [True] * num_bars  # Generate all bars for infill
         
-        # Configure sampling parameters for infilling
-        temperature = params.get('temperature', 1.0)
-        
-        # Create status configuration for infilling
         status_config = {
             'tracks': [{
                 'track_id': 0,
                 'temperature': temperature,
                 'instrument': 'acoustic_grand_piano',
-                'density': 10,
+                'density': min(10, 6 + len(extra_ids)),
                 'track_type': 10,
                 'ignore': False,
-                'selected_bars': [True] * 4,  # Enable infilling for bars
+                'selected_bars': selected_bars,
                 'min_polyphony_q': 'POLYPHONY_ANY',
                 'max_polyphony_q': 'POLYPHONY_ANY',
-                'autoregressive': False,  # Use conditional generation
-                'polyphony_hard_limit': 6
+                'autoregressive': True,
+                'polyphony_hard_limit': min(12, 6 + len(extra_ids))
             }]
         }
         
-        # Create parameter configuration
         param_config = {
             'tracks_per_step': 1,
-            'bars_per_step': 1,
+            'bars_per_step': min(4, num_bars),
             'model_dim': 4,
             'percentage': 100,
             'batch_size': 1,
             'temperature': temperature,
-            'max_steps': 50,  # Shorter for faster response
-            'polyphony_hard_limit': 6,
-            'shuffle': True,
-            'verbose': False,  # Reduce output noise
-            'ckpt': os.path.abspath(model_path),  # Use absolute path for model
+            'max_steps': max(200, min_length * 50),
+            'polyphony_hard_limit': min(12, 6 + len(extra_ids)),
+            'shuffle': False,
+            'verbose': False,
+            'ckpt': os.path.abspath(model_path),
             'sampling_seed': -1,
             'mask_top_k': 0
         }
         
-        # Convert to JSON strings
+        # Step 5: Generate
         piece_json = json.dumps(midi_data)
         status_json = json.dumps(status_config)
         param_json = json.dumps(param_config)
         
-        print("Calling MidiGPT sample_multi_step...")
-        print(f"Model checkpoint: {os.path.abspath(model_path)}")
-        
-        # Create callback manager
         callbacks = midigpt.CallbackManager()
+        max_attempts = 3
         
-        # Call MidiGPT sampling
-        max_attempts = 1  # Single attempt for speed
-        result_list = midigpt.sample_multi_step(
-            piece_json, status_json, param_json, max_attempts, callbacks
-        )
+        result = midigpt.sample_multi_step(piece_json, status_json, param_json, 
+                                         max_attempts, callbacks)
         
-        if result_list and len(result_list) > 0:
-            result_json = result_list[0]
-            print(f"✅ MidiGPT returned: {len(result_json)} chars")
+        if result and len(result) > 0:
+            result_json = result[0]
             
-            # Convert result back to CA format
-            return convert_midigpt_result_to_ca_format(result_json, extra_ids)
+            # Convert back and map to extra_ids
+            temp_output_file = temp_dir / f"infill_output_{uuid.uuid4().hex[:8]}.mid"
+            encoder.json_to_midi(result_json, str(temp_output_file))
+            
+            ca_result = map_generated_notes_to_extra_ids(
+                str(temp_output_file), input_string, extra_ids
+            )
+            
+            # Clean up
+            try:
+                os.unlink(midi_file_path)
+                os.unlink(temp_output_file)
+            except:
+                pass
+            
+            return ca_result
         else:
-            print("❌ MidiGPT returned empty result")
-            return generate_fallback_content(extra_ids)
+            return generate_enhanced_fallback(input_string, extra_ids, temperature)
             
     except Exception as e:
-        print(f"❌ MidiGPT processing error: {e}")
-        import traceback
-        traceback.print_exc()
-        return generate_fallback_content(extra_ids)
+        print(f"Error in infill generation: {e}")
+        return generate_enhanced_fallback(input_string, extra_ids, temperature)
 
-def convert_midigpt_result_to_ca_format(midigpt_result_json: str, extra_ids: List[int]) -> str:
-    """Convert MidiGPT JSON result back to CA string format"""
-    try:
-        # Parse the JSON result from MidiGPT
-        result_data = json.loads(midigpt_result_json)
-        
-        print(f"Converting MidiGPT result: {len(midigpt_result_json)} chars JSON")
-        
-        # MidiGPT returns JSON in the same format as input - let's convert it back to MIDI and parse
-        # This follows the pattern from pythoninferencetest.py
-        
-        # Create a temporary MIDI file from the MidiGPT result
-        temp_id = str(uuid.uuid4())[:8]
-        temp_result_midi = TEMP_MIDI_DIR / f"midigpt_result_{temp_id}.mid"
-        
-        try:
-            # Use MidiGPT's encoder to convert JSON back to MIDI
-            encoder = midigpt.ExpressiveEncoder()
-            encoder.json_to_midi(midigpt_result_json, str(temp_result_midi))
-            
-            print(f"Converted MidiGPT JSON to MIDI file: {temp_result_midi}")
-            
-            # Now read the MIDI file and extract notes for CA format
-            if USE_MIDO:
-                mid = mido.MidiFile(str(temp_result_midi))
-                notes = []
-                current_time = 0
-                
-                for track in mid.tracks:
-                    track_time = 0
-                    active_notes = {}  # pitch -> start_time
-                    
-                    for msg in track:
-                        track_time += msg.time
-                        
-                        if msg.type == 'note_on' and msg.velocity > 0:
-                            active_notes[msg.note] = track_time
-                        elif (msg.type == 'note_off' or 
-                              (msg.type == 'note_on' and msg.velocity == 0)):
-                            if msg.note in active_notes:
-                                start_time = active_notes.pop(msg.note)
-                                duration = track_time - start_time
-                                notes.append({
-                                    'pitch': msg.note,
-                                    'start': start_time,
-                                    'duration': max(120, duration),  # Minimum duration
-                                    'velocity': 80
-                                })
-                
-                print(f"Extracted {len(notes)} notes from MidiGPT result")
-                
-            else:
-                # Use miditoolkit
-                mid = miditoolkit.MidiFile(str(temp_result_midi))
-                notes = []
-                
-                for instrument in mid.instruments:
-                    if not instrument.is_drum:
-                        for note in instrument.notes:
-                            notes.append({
-                                'pitch': note.pitch,
-                                'start': note.start,
-                                'duration': max(120, note.end - note.start),
-                                'velocity': note.velocity
-                            })
-                
-                print(f"Extracted {len(notes)} notes from MidiGPT result")
-            
-            # Clean up temp file
-            try:
-                temp_result_midi.unlink()
-            except:
-                pass
-            
-            if notes:
-                # Sort notes by start time
-                notes.sort(key=lambda x: x['start'])
-                
-                # Convert to CA format instructions
-                ca_instructions = []
-                last_end_time = 0
-                
-                for note in notes:
-                    # Add wait if there's a gap
-                    if note['start'] > last_end_time:
-                        wait_time = note['start'] - last_end_time
-                        ca_instructions.append(f"w:{int(wait_time)}")
-                    
-                    # Add note and duration
-                    ca_instructions.append(f"N:{int(note['pitch'])}")
-                    ca_instructions.append(f"d:{int(note['duration'])}")
-                    
-                    last_end_time = note['start'] + note['duration']
-                
-                # Distribute across extra_ids
-                if ca_instructions:
-                    instructions_per_id = max(1, len(ca_instructions) // len(extra_ids))
-                    result_parts = []
-                    
-                    for i, extra_id in enumerate(extra_ids):
-                        start_idx = i * instructions_per_id
-                        end_idx = start_idx + instructions_per_id
-                        if i == len(extra_ids) - 1:
-                            end_idx = len(ca_instructions)
-                        
-                        id_instructions = ca_instructions[start_idx:end_idx]
-                        if id_instructions:
-                            instruction_str = ';'.join(id_instructions)
-                            result_parts.append(f"<extra_id_{extra_id}>{instruction_str}")
-                    
-                    result = ''.join(result_parts)
-                    print(f"✅ Converted to CA format: {len(result)} chars")
-                    print(f"CA result preview: {result[:100]}...")
-                    return result
-            
-            print("No notes found in converted MIDI, using fallback")
-            return generate_fallback_content(extra_ids)
-            
-        except Exception as e:
-            print(f"Error converting MidiGPT JSON to MIDI: {e}")
-            # Clean up temp file
-            try:
-                temp_result_midi.unlink()
-            except:
-                pass
-            return generate_fallback_content(extra_ids)
-        
-    except Exception as e:
-        print(f"Error parsing MidiGPT result: {e}")
-        import traceback
-        traceback.print_exc()
-        return generate_fallback_content(extra_ids)
+def create_minimal_midi_structure(temp_dir, num_extra_ids):
+    """Create a minimal MIDI file with basic structure for infill"""
+    import mido
+    import uuid
+    
+    filename = f"minimal_structure_{uuid.uuid4().hex[:8]}.mid"
+    filepath = temp_dir / filename
+    
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    
+    # Add tempo
+    track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+    
+    # Add seed notes
+    seed_notes = [60, 64, 67]  # C major triad
+    
+    for i, pitch in enumerate(seed_notes):
+        track.append(mido.Message('note_on', channel=0, note=pitch, 
+                                velocity=64, time=0 if i == 0 else 0))
+        track.append(mido.Message('note_off', channel=0, note=pitch, 
+                                velocity=0, time=480))
+    
+    # Add silence for generation
+    bars_to_generate = max(4, num_extra_ids)
+    silence_duration = bars_to_generate * 4 * 480
+    track.append(mido.Message('note_on', channel=0, note=60, velocity=0, time=silence_duration))
+    
+    mid.save(str(filepath))
+    return str(filepath)
 
-def generate_fallback_content(extra_ids: List[int]) -> str:
-    """Generate fallback content when MidiGPT is unavailable"""
-    if not extra_ids:
-        extra_ids = [0]
+def map_generated_notes_to_extra_ids(midi_path, original_input, extra_ids):
+    """Convert generated MIDI back to CA format and map to extra_ids"""
+    import mido
     
-    fallback_patterns = [
-        "N:60;d:480;w:240;N:64;d:480;w:240;N:67;d:480",
-        "N:69;d:240;w:120;N:65;d:240;w:120;N:62;d:480",
-        "N:72;d:960;w:480;N:69;d:480;w:240;N:65;d:240",
-        "N:57;d:480;w:240;N:60;d:480;w:240;N:64;d:480"
-    ]
+    # Extract notes from generated MIDI
+    notes = []
+    mid = mido.MidiFile(midi_path)
+    current_time = 0
     
-    result_parts = []
+    for track in mid.tracks:
+        for msg in track:
+            current_time += msg.time
+            if msg.type == 'note_on' and msg.velocity > 0:
+                notes.append({
+                    'pitch': msg.note,
+                    'start': current_time,
+                    'velocity': msg.velocity
+                })
+            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                for note in reversed(notes):
+                    if note['pitch'] == msg.note and 'duration' not in note:
+                        note['duration'] = current_time - note['start']
+                        break
+    
+    # Filter generated content (after seed notes)
+    generated_notes = [n for n in notes if n.get('start', 0) > 1440]
+    
+    if not generated_notes:
+        return generate_enhanced_fallback(original_input, extra_ids, 1.0)
+    
+    # Sort and distribute notes to extra_ids
+    generated_notes.sort(key=lambda x: x['start'])
+    notes_per_extra_id = max(1, len(generated_notes) // len(extra_ids))
+    
+    result = original_input
+    
     for i, extra_id in enumerate(extra_ids):
-        pattern = fallback_patterns[i % len(fallback_patterns)]
-        result_parts.append(f"<extra_id_{extra_id}>{pattern}")
-    
-    return ''.join(result_parts)
-
-def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0,
-                   has_fully_masked_inst=False, temperature=1.0) -> str:
-    """Main inference function - mirrors CA server signature with MIDI file conversion"""
-    global LAST_CALL, LAST_OUTPUTS
-    
-    # CRITICAL: Convert S from dict to object (same as CA server)
-    try:
-        import preprocessing_functions as pre
-        S = pre.midisongbymeasure_from_save_dict(S)
-        print(f"Converted song dict to object: {len(S.tracks)} tracks")
-    except Exception as e:
-        print(f"Warning: Could not convert S parameter: {e}")
-        # Continue with S as-is for fallback processing
-    
-    s_request_normalized = normalize_requests(s)
-    
-    if DEBUG:
-        print(f"\n=== MIDIGPT SERVER REQUEST ===")
-        print(f"Input string length: {len(s)} chars")
-        print(f"Input preview: {s[:100]}...")
-        print(f"Temperature: {temperature}")
-        print(f"Use sampling: {use_sampling}")
-    
-    if s_request_normalized != LAST_CALL:
-        LAST_OUTPUTS = set()
-    
-    if len(s) > MAX_NN_LENGTH:
-        print('WARNING: neural net input is too long')
-    
-    # Extract extra_ids from input
-    extra_ids = extract_extra_ids_from_input(s)
-    if not extra_ids:
-        extra_ids = [0]
-    
-    print(f"Found extra_ids: {extra_ids}")
-    
-    # Create MIDI file from CA string data
-    midi_file_path = create_midi_file_from_ca_string(s)
-    
-    if not midi_file_path:
-        print("Failed to create MIDI file, using fallback")
-        result = generate_fallback_content(extra_ids)
-    else:
-        # Prepare parameters for MidiGPT
-        params = {
-            'temperature': temperature,
-            'use_sampling': use_sampling,
-            'min_length': min_length
-        }
+        start_idx = i * notes_per_extra_id
+        end_idx = min(start_idx + notes_per_extra_id, len(generated_notes))
+        notes_for_this_id = generated_notes[start_idx:end_idx]
         
-        # Process with MidiGPT or fallback
-        result = process_with_midigpt(midi_file_path, extra_ids, params)
+        # Convert notes to CA format
+        ca_notes = []
+        last_end = 0
         
-        # Clean up temporary MIDI file
-        try:
-            os.remove(midi_file_path)
-            print(f"Cleaned up temp file: {midi_file_path}")
-        except:
-            pass
-    
-    # Update cache
-    LAST_CALL = s_request_normalized
-    result_normalized = normalize_requests(result)
-    LAST_OUTPUTS.add(result_normalized)
-    
-    if DEBUG:
-        print(f"Generated result length: {len(result)} chars")
-        print(f"Result preview: {result[:100]}...")
-        print(f"=== REQUEST COMPLETE ===\n")
+        for note in notes_for_this_id:
+            if 'duration' not in note:
+                note['duration'] = 240
+            
+            wait = max(0, note['start'] - note.get('start', 0) - last_end) if last_end > 0 else 0
+            ca_notes.append(f"N:{note['pitch']};d:{note['duration']};w:{wait}")
+            last_end = note['start'] + note['duration']
+        
+        # Replace extra_id token
+        token = f"<extra_id_{extra_id}>"
+        replacement = "".join(ca_notes) if ca_notes else "N:60;d:240;w:0"
+        result = result.replace(token, replacement, 1)
     
     return result
 
-if __name__ == '__main__':
-    # Start the XML-RPC server
-    from xmlrpc.server import SimpleXMLRPCServer
+def handle_continuation_generation(input_string, S, extra_ids, temperature, min_length, temp_dir):
+    """Handle continuation generation - placeholder for now"""
+    return generate_enhanced_fallback(input_string, extra_ids, temperature)
+
+def generate_enhanced_fallback(input_string, extra_ids, temperature):
+    """Generate enhanced fallback based on temperature"""
     
-    print("="*60)
-    print("MidiGPT-REAPER Server with MIDI File Conversion")
-    print("="*60)
-    print(f"MIDI library: {'✅' if MIDI_LIB_AVAILABLE else '❌'}")
-    print(f"MidiGPT library: {'✅' if MIDIGPT_AVAILABLE else '❌ (fallback mode)'}")
-    print(f"Temp MIDI directory: {TEMP_MIDI_DIR}")
-    print(f"Device: {DEVICE}")
+    # Base notes - vary by temperature
+    if temperature < 0.7:
+        base_notes = [60, 64, 67]  # Conservative
+    elif temperature > 1.3:
+        base_notes = [60, 63, 66, 70, 73]  # Adventurous
+    else:
+        base_notes = [60, 64, 67, 72]  # Standard
     
-    SERVER = SimpleXMLRPCServer(('127.0.0.1', 3456), logRequests=DEBUG)
-    SERVER.register_function(call_nn_infill)
+    result = input_string
     
-    print(f"\n🚀 Server running on http://127.0.0.1:3456")
-    print("Ready to receive REAPER requests!")
-    print("Press Ctrl+C to stop")
+    for i, extra_id in enumerate(extra_ids):
+        note = base_notes[i % len(base_notes)]
+        duration = int(240 * (0.5 + temperature))
+        wait = duration if i > 0 else 0
+        
+        token = f"<extra_id_{extra_id}>"
+        replacement = f"N:{note};d:{duration};w:{wait}"
+        if i < len(extra_ids) - 1:
+            replacement += f"N:{note + 4};d:{duration};w:0"
+        result = result.replace(token, replacement, 1)
+    
+    return result
+
+def generate_simple_fallback(input_string, extra_ids):
+    """Simple fallback - just replace tokens"""
+    result = input_string
+    for extra_id in extra_ids:
+        token = f"<extra_id_{extra_id}>"
+        replacement = "N:60;d:240;w:240;N:64;d:240;w:240"
+        result = result.replace(token, replacement, 1)
+    return result
+
+def find_midigpt_model():
+    """Find MidiGPT model checkpoint file"""
+    possible_paths = [
+        "../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt"
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+if __name__ == "__main__":
+    class ThreadedXMLRPCServer(socketserver.ThreadingMixIn, SimpleXMLRPCServer):
+        allow_reuse_address = True
+    
+    print("🎵 Starting MidiGPT Production Server")
+    print("Port: 3456")
+    print("Ready for REAPER connections...")
     
     try:
-        SERVER.serve_forever()
-    except KeyboardInterrupt:
-        print('\n👋 MidiGPT server shutting down...')
+        server = ThreadedXMLRPCServer(("localhost", 3456), allow_none=True)
+        server.register_function(call_nn_infill)
+        server.serve_forever()
         
-        # Clean up temp files
-        try:
-            for temp_file in TEMP_MIDI_DIR.glob("*.mid"):
-                temp_file.unlink()
-            print("Cleaned up temporary MIDI files")
-        except:
-            pass
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping MidiGPT server...")
+        server.shutdown()
+    except Exception as e:
+        print(f"❌ Server error: {e}")
