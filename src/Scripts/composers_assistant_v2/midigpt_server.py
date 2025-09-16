@@ -52,6 +52,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             ca_result = handle_continuation_generation(s, temperature)
             
         print(f"Generated result: {len(ca_result)} chars")
+        print(f"COMPLETE return string: {ca_result}")  # Show the complete string
         
         # CRITICAL: Return the CA string directly, not wrapped in a dictionary
         # REAPER expects just the string, not {'result': string}
@@ -63,78 +64,58 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         return ";M:0;N:60;d:480;w:480;"
 
 def handle_infill_generation(s, extra_ids, temperature):
-    """Handle infill generation for empty MIDI items"""
+    """Handle infill generation using the WORKING approach from pythoninferencetest.py"""
     
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Create minimal MIDI structure with seed notes
-        midi_path = create_minimal_midi_structure(temp_dir, len(extra_ids))
+        # Create MIDI with content in bars 0,1,3 and empty bar 2 for generation
+        midi_path = create_infill_midi_structure(temp_dir)
         
         # Convert to MidiGPT format
         encoder = midigpt.ExpressiveEncoder()
         piece_json = encoder.midi_to_json(midi_path)
         
-        # DEBUG: Parse and inspect the JSON structure
-        try:
-            piece_data = json.loads(piece_json)
-            num_tracks = len(piece_data.get('tracks', []))
-            print(f"MIDI structure: {num_tracks} tracks")
-            
-            # Ensure we have at least one track
-            if num_tracks == 0:
-                print("Warning: No tracks found in MIDI structure")
-                return generate_fallback_notes(len(extra_ids))
-                
-        except json.JSONDecodeError:
-            print("Error: Could not parse MIDI JSON structure")
-            return generate_fallback_notes(len(extra_ids))
-        
-        # Configure exactly like pythoninferencetest.py (WORKING EXAMPLE)
+        # Use the EXACT working configuration from pythoninferencetest.py
         status_json = {
             'tracks': [{
                 'track_id': 0,
-                'temperature': 0.5,  # Match working example
+                'temperature': 0.5,
                 'instrument': 'acoustic_grand_piano', 
                 'density': 10, 
                 'track_type': 10, 
                 'ignore': False, 
-                'selected_bars': [False, False, True, False],  # EXACT copy from working example
+                'selected_bars': [False, False, True, False],  # Generate only bar 2
                 'min_polyphony_q': 'POLYPHONY_ANY', 
                 'max_polyphony_q': 'POLYPHONY_ANY', 
-                'autoregressive': False,  # CRITICAL: Match working example
-                'polyphony_hard_limit': 9  # Match working example
+                'autoregressive': False,  # INFILL mode, not autoregressive
+                'polyphony_hard_limit': 9 
             }]
         }
         
-        # DEBUG: Validate configuration matches pythoninferencetest.py
-        print(f"Using working example config: autoregressive=False, selected_bars=[False, False, True, False]")
-        print(f"Expected tracks in piece: {num_tracks}")
-        if num_tracks < 1:
-            print("ERROR: Insufficient tracks in piece for generation")
-            return generate_fallback_notes(len(extra_ids))
-        
         param_json = {
-            'tracks_per_step': 1,       # Match working example
-            'bars_per_step': 1,         # CRITICAL: Match working example
-            'model_dim': 4,             # Match working example
-            'percentage': 100,          # Match working example
-            'batch_size': 1,            # Match working example
-            'temperature': 1.0,         # Match working example
-            'max_steps': 200,           # Match working example
-            'polyphony_hard_limit': 6,  # Match working example
-            'shuffle': True,            # Match working example
-            'verbose': True,            # Match working example
+            'tracks_per_step': 1, 
+            'bars_per_step': 1, 
+            'model_dim': 4, 
+            'percentage': 100, 
+            'batch_size': 1, 
+            'temperature': 1.0, 
+            'max_steps': 200, 
+            'polyphony_hard_limit': 6, 
+            'shuffle': True, 
+            'verbose': True, 
             'ckpt': find_model_path(),
-            'sampling_seed': -1,        # Match working example
-            'mask_top_k': 0             # Match working example
+            'sampling_seed': -1,
+            'mask_top_k': 0
         }
         
-        # Convert to JSON strings (CRITICAL: sample_multi_step expects strings, not dicts)
-        piece_str = piece_json  # Already a string from encoder.midi_to_json()
+        # Convert to JSON strings
+        piece_str = piece_json
         status_str = json.dumps(status_json)
         param_str = json.dumps(param_json)
         
-        # Create CallbackManager (required parameter)
+        # Create CallbackManager
         callbacks = midigpt.CallbackManager()
+        
+        print(f"Using WORKING pythoninferencetest.py configuration")
         
         try:
             results = midigpt.sample_multi_step(
@@ -143,69 +124,63 @@ def handle_infill_generation(s, extra_ids, temperature):
             
             if results and len(results) > 0:
                 result_json_str = results[0]
-                temp_midi = os.path.join(temp_dir, 'output.mid')
+                temp_midi = os.path.join(temp_dir, 'generated.mid')
                 encoder.json_to_midi(result_json_str, temp_midi)
-                return extract_notes_and_convert_to_ca_format(temp_midi)
-            else:
-                print("No results from autoregressive generation, trying fallback")
                 
-        except Exception as generation_error:
-            print(f"Autoregressive generation failed: {generation_error}")
-            print("Trying simpler generation approach...")
+                # Extract generated content
+                ca_result = extract_any_notes_from_midi(temp_midi)
+                
+                if ca_result and len(ca_result) > 20:
+                    print(f"Successfully generated {len(ca_result)} chars using working config")
+                    print(f"Sample output: {ca_result[:200]}...")
+                    return ca_result
+                else:
+                    print("Generated content was too minimal")
             
-            # Fallback: Try minimal infill approach  
-            try:
-                # Simpler configuration that's more likely to work
-                simple_status = {
-                    'tracks': [{
-                        'track_id': 0,
-                        'temperature': temperature,
-                        'instrument': 'acoustic_grand_piano',
-                        'density': 5,  # Lower density
-                        'track_type': 10,
-                        'ignore': False,
-                        'selected_bars': [True, False, False, False],  # Just generate first bar
-                        'min_polyphony_q': 'POLYPHONY_ANY',
-                        'max_polyphony_q': 'POLYPHONY_ANY', 
-                        'autoregressive': False,  # Safer infill mode
-                        'polyphony_hard_limit': 4  # Lower limit
-                    }]
-                }
-                
-                simple_param = {
-                    'tracks_per_step': 1,
-                    'bars_per_step': 1,  # Single bar
-                    'model_dim': 4,
-                    'percentage': 100,
-                    'batch_size': 1,
-                    'temperature': temperature,
-                    'max_steps': 50,     # Lower steps
-                    'polyphony_hard_limit': 4,
-                    'shuffle': False,
-                    'verbose': False,
-                    'ckpt': find_model_path(),
-                    'sampling_seed': -1,
-                    'mask_top_k': 0
-                }
-                
-                simple_status_str = json.dumps(simple_status)
-                simple_param_str = json.dumps(simple_param)
-                
-                print("Attempting simplified generation...")
-                fallback_results = midigpt.sample_multi_step(
-                    piece_str, simple_status_str, simple_param_str, 3, callbacks
-                )
-                
-                if fallback_results and len(fallback_results) > 0:
-                    result_json_str = fallback_results[0]
-                    temp_midi = os.path.join(temp_dir, 'fallback_output.mid')
-                    encoder.json_to_midi(result_json_str, temp_midi)
-                    return extract_notes_and_convert_to_ca_format(temp_midi)
-                    
-            except Exception as fallback_error:
-                print(f"Fallback generation also failed: {fallback_error}")
+        except Exception as generation_error:
+            print(f"Working config failed: {generation_error}")
         
         return generate_fallback_notes(len(extra_ids))
+
+def create_infill_midi_structure(temp_dir):
+    """Create MIDI structure with content for infill generation (like pythoninferencetest.py)"""
+    
+    midi_path = os.path.join(temp_dir, 'infill_seed.mid')
+    
+    mid = mido.MidiFile(ticks_per_beat=480, type=0)
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+    
+    # Add meta messages
+    track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, 
+                                 clocks_per_click=24, notated_32nd_notes_per_beat=8, time=0))
+    track.append(mido.Message('program_change', channel=0, program=0, time=0))
+    
+    ticks_per_beat = 480
+    ticks_per_bar = ticks_per_beat * 4
+    
+    # Bar 0: Add context notes
+    track.append(mido.Message('note_on', channel=0, note=60, velocity=80, time=0))
+    track.append(mido.Message('note_off', channel=0, note=60, velocity=0, time=ticks_per_beat))
+    track.append(mido.Message('note_on', channel=0, note=64, velocity=80, time=0))
+    track.append(mido.Message('note_off', channel=0, note=64, velocity=0, time=ticks_per_beat))
+    
+    # Bar 1: Add more context
+    track.append(mido.Message('note_on', channel=0, note=67, velocity=80, time=ticks_per_beat))
+    track.append(mido.Message('note_off', channel=0, note=67, velocity=0, time=ticks_per_beat))
+    
+    # Bar 2: EMPTY - this is where MidiGPT will generate
+    track.append(mido.Message('note_on', channel=0, note=60, velocity=0, time=ticks_per_bar))
+    
+    # Bar 3: Add ending context
+    track.append(mido.Message('note_on', channel=0, note=72, velocity=80, time=0))
+    track.append(mido.Message('note_off', channel=0, note=72, velocity=0, time=ticks_per_beat * 2))
+    
+    track.append(mido.MetaMessage('end_of_track', time=0))
+    
+    mid.save(midi_path)
+    return midi_path
 
 def handle_continuation_generation(s, temperature):
     """Handle continuation generation with existing notes"""
@@ -251,47 +226,56 @@ def handle_continuation_generation(s, temperature):
             'mask_top_k': 0
         }
         
-        # Convert to JSON strings (CRITICAL: sample_multi_step expects strings, not dicts)
-        piece_str = piece_json  # Already a string from encoder.midi_to_json()
+        # Convert to JSON strings
+        piece_str = piece_json
         status_str = json.dumps(status_json)
         param_str = json.dumps(param_json)
         
-        # Create CallbackManager (required parameter)
+        # Create CallbackManager
         callbacks = midigpt.CallbackManager()
         
-        results = midigpt.sample_multi_step(
-            piece_str, status_str, param_str, 3, callbacks
-        )
-        
-        if results and len(results) > 0:
-            temp_midi = os.path.join(temp_dir, 'output.mid')
-            encoder.json_to_midi(results[0], temp_midi)
-            return extract_notes_and_convert_to_ca_format(temp_midi)
+        try:
+            results = midigpt.sample_multi_step(
+                piece_str, status_str, param_str, 3, callbacks
+            )
+            
+            if results and len(results) > 0:
+                temp_midi = os.path.join(temp_dir, 'output.mid')
+                encoder.json_to_midi(results[0], temp_midi)
+                return extract_any_notes_from_midi(temp_midi) or s
+                
+        except Exception as e:
+            print(f"Continuation generation failed: {e}")
         
         return s  # Return original if generation fails
 
 def create_empty_midi_structure(temp_dir, num_bars=4):
-    """Create an empty MIDI structure with just timing information"""
+    """Create a minimal MIDI structure with just enough content for MidiGPT to process"""
     
-    midi_path = os.path.join(temp_dir, 'empty.mid')
+    midi_path = os.path.join(temp_dir, 'minimal.mid')
     
-    # Create completely empty MIDI file with just structural information
+    # Create MIDI file with minimal but valid musical content
     mid = mido.MidiFile(ticks_per_beat=480, type=0)
     track = mido.MidiTrack()
     mid.tracks.append(track)
     
-    # Add only essential meta messages - no actual notes
+    # Add essential meta messages
     track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
     track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, 
                                  clocks_per_click=24, notated_32nd_notes_per_beat=8, time=0))
     track.append(mido.Message('program_change', channel=0, program=0, time=0))
     
-    # Create empty time structure for the number of bars we want
-    ticks_per_bar = 480 * 4  # 4/4 time
-    total_time = ticks_per_bar * num_bars
+    # Add ONE minimal note to satisfy MidiGPT's requirement
+    # This gives it just enough to work with without constraining creativity
+    track.append(mido.Message('note_on', channel=0, note=60, velocity=40, time=0))  # Quiet C
+    track.append(mido.Message('note_off', channel=0, note=60, velocity=0, time=240))  # Short duration
     
-    # Add a single silent "note" to establish the time span
-    track.append(mido.Message('note_on', channel=0, note=60, velocity=0, time=total_time))
+    # Add silence for the rest of the structure
+    ticks_per_bar = 480 * 4  # 4/4 time
+    remaining_time = (ticks_per_bar * num_bars) - 240  # Subtract the note duration
+    
+    # Add silence to fill the remaining time
+    track.append(mido.Message('note_on', channel=0, note=60, velocity=0, time=remaining_time))
     track.append(mido.MetaMessage('end_of_track', time=0))
     
     mid.save(midi_path)
@@ -403,48 +387,15 @@ def extract_any_notes_from_midi(midi_path):
                 result = ';' + ';'.join(ca_parts) + ';'
                 return result
         
-def extract_notes_and_convert_to_ca_format(midi_path):
-    """Original function - kept as fallback"""
-    
-    try:
-        mid = mido.MidiFile(midi_path)
-        ca_parts = []
-        
-        # Track state
-        measure = 0
-        
-        for msg in mid.tracks[0]:
-            if msg.type == 'note_on' and msg.velocity > 0:
-                # Convert to CA format
-                pitch = msg.note
-                duration = 480  # Default duration
-                
-                # Find corresponding note_off
-                remaining_time = duration
-                for future_msg in mid.tracks[0]:
-                    if (future_msg.type == 'note_off' and 
-                        future_msg.note == pitch):
-                        duration = future_msg.time if future_msg.time > 0 else 480
-                        break
-                
-                # Format as CA string
-                ca_parts.extend([
-                    f'M:{measure}',
-                    f'N:{pitch}', 
-                    f'd:{duration}',
-                    f'w:{duration}'
-                ])
-        
-        if ca_parts:
-            result = ';' + ';'.join(ca_parts) + ';'
-            return result
+        print("No notes found in generated MIDI")
+        return None
         
     except Exception as e:
-        print(f"Error converting MIDI to CA format: {e}")
-    
-    # Fallback
-    return ";M:0;N:60;d:480;w:480;"
-    """Convert MIDI file back to CA format string"""
+        print(f"Error extracting notes from MIDI: {e}")
+        return None
+
+def extract_notes_and_convert_to_ca_format(midi_path):
+    """Original function - kept as fallback"""
     
     try:
         mid = mido.MidiFile(midi_path)
@@ -493,8 +444,9 @@ def generate_fallback_notes(num_notes):
     
     for i in range(min(num_notes, len(pitches))):
         pitch = pitches[i]
+        measure = i  # Different measure for each note
         ca_parts.extend([
-            f'M:{i // 4}',  # New measure every 4 notes
+            f'M:{measure}',
             f'N:{pitch}',
             'd:480',
             'w:480'
