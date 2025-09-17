@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MidiGPT Server with Full Debug Tracing
-Integrates comprehensive debugging to trace the generation pipeline
+Fresh MidiGPT Server - Single Note Per Extra ID
+Based on analysis of working two-server solution
 """
 
 import sys
@@ -28,167 +28,139 @@ class RequestHandler(SimpleXMLRPCRequestHandler):
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
                    has_fully_masked_inst=False, temperature=1.0):
     """
-    REAPER interface function with full debug tracing
+    REAPER interface function - FRESH IMPLEMENTATION
+    Key insight: Each extra_id gets exactly ONE note
     """
-    print("🎵 MidiGPT call_nn_infill called")
-    print(f"📊 Parameters: temp={temperature}, sampling={use_sampling}")
+    print("MidiGPT call_nn_infill called - FRESH VERSION")
     
     try:
         # Convert S parameter if needed
         if hasattr(S, 'keys'):
             S = pre.midisongbymeasure_from_save_dict(S)
         
-        # Extract extra_id tokens from input
+        # Extract extra_id tokens
         extra_ids = extract_extra_id_tokens(s)
         print(f"Found extra IDs: {extra_ids}")
         
-        # Check libraries
-        print("✅ MidiGPT library available")
-        print("✅ Mido library available")
-        print("🚀 Using MidiGPT generation")
+        print("MidiGPT library available")
+        print("Mido library available")
         
-        # Use debug generation flow
+        # Generate content
         if extra_ids:
-            print("🎯 Infill generation with DEBUG")
-            ca_instructions = debug_generation_path(extra_ids, temperature)
+            print("Infill generation")
+            generated_notes = generate_notes(len(extra_ids), temperature)
         else:
-            print("🎵 Continuation generation with DEBUG") 
-            ca_instructions = debug_generation_path(['<extra_id_1>'], temperature)
+            print("Continuation generation") 
+            generated_notes = generate_notes(1, temperature)
             extra_ids = ['<extra_id_1>']
             
-        # Format response with extra_id tokens
-        result = format_response_with_extra_ids(extra_ids, ca_instructions)
+        # Format response: ONE note per extra_id
+        result = format_single_note_response(extra_ids, generated_notes)
         
-        print(f"✅ Final result: {result}")
-        
+        print(f"Final result: {result}")
         return result
         
     except Exception as e:
-        print(f"❌ Error in call_nn_infill: {e}")
-        import traceback
-        traceback.print_exc()
-        # Return properly formatted fallback
-        return ";<extra_id_1>;N:60;d:480;w:480;"
+        print(f"Error: {e}")
+        return "<extra_id_1>N:60;d:240;w:240"
 
-def debug_generation_path(extra_ids, temperature):
-    """Enhanced generation with detailed debugging"""
-    print(f"\n=== GENERATION DEBUG SESSION ===")
-    print(f"Extra IDs: {extra_ids}")
-    print(f"Temperature: {temperature}")
-    
+def extract_extra_id_tokens(input_string):
+    """Extract extra_id tokens from input string"""
+    pattern = r'<extra_id_\d+>'
+    tokens = re.findall(pattern, input_string)
+    return tokens
+
+def generate_notes(num_notes, temperature):
+    """Generate notes using MidiGPT or fallback"""
     try:
-        # Step 1: MidiGPT generation attempt
-        print("\n1. ATTEMPTING MIDIGPT GENERATION...")
-        ca_instructions = attempt_midigpt_generation(len(extra_ids), temperature)
-        
-        if ca_instructions:
-            print(f"✅ MidiGPT SUCCESS: Generated {len(ca_instructions)} instructions")
-            print(f"   First few: {ca_instructions[:6]}")
-            
-            # Validate the content quality
-            quality = analyze_generation_quality(ca_instructions)
-            print(f"   Quality score: {quality}/10")
-            
-            if quality >= 5:  # Threshold for acceptable quality
-                print("   ✅ Quality acceptable, using MidiGPT output")
-                return ca_instructions
-            else:
-                print("   ⚠️ Quality too low, falling back")
-        else:
-            print("❌ MidiGPT FAILED: No instructions generated")
-        
+        # Try MidiGPT generation
+        notes = attempt_midigpt_generation(num_notes, temperature)
+        if notes:
+            print(f"MidiGPT generated {len(notes)} notes: {[n['pitch'] for n in notes]}")
+            return notes
     except Exception as e:
-        print(f"❌ MidiGPT ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"MidiGPT failed: {e}")
     
-    # Step 2: Fallback generation
-    print("\n2. USING FALLBACK GENERATION...")
-    fallback = generate_enhanced_fallback(len(extra_ids))
-    print(f"✅ Fallback generated: {len(fallback)} instructions")
-    print(f"   Content: {fallback[:6]}")
-    
-    return fallback
+    # Fallback generation
+    print("Using fallback generation")
+    fallback_pitches = [60, 64, 67, 69, 72]  # C major pentatonic
+    notes = []
+    for i in range(num_notes):
+        pitch = fallback_pitches[i % len(fallback_pitches)]
+        notes.append({'pitch': pitch, 'duration': 240})
+    return notes
 
-def attempt_midigpt_generation(num_extra_ids, temperature):
-    """Attempt MidiGPT generation with detailed step tracking"""
-    
-    print("   📂 Creating temp directory...")
+def attempt_midigpt_generation(num_notes, temperature):
+    """Attempt MidiGPT generation"""
     temp_dir = tempfile.mkdtemp()
     
     try:
-        # Step A: Create input MIDI
-        print("   🎼 Creating input MIDI...")
+        # Create input MIDI
         midi_file_path = os.path.join(temp_dir, "input.mid")
-        create_debug_midi_input(midi_file_path, num_extra_ids)
+        create_simple_midi_input(midi_file_path, num_notes)
         
-        # Verify MIDI file
-        verify_midi_file(midi_file_path)
-        
-        # Step B: Load model and encoder
-        print("   🤖 Loading MidiGPT model...")
+        # Load model and encoder
         model_path = find_model_path()
         encoder = midigpt.ExpressiveEncoder()
-        print(f"   ✅ Model loaded: {os.path.basename(model_path)}")
         
-        # Step C: Convert to JSON
-        print("   🔄 Converting MIDI to JSON...")
+        # Convert to JSON
         piece_json_str = encoder.midi_to_json(midi_file_path)
         piece_json = json.loads(piece_json_str)
         
-        print(f"   ✅ JSON created: {len(piece_json_str)} chars")
-        print(f"   JSON keys: {list(piece_json.keys()) if isinstance(piece_json, dict) else 'Not a dict'}")
+        # Use exact working configuration from pythoninferencetest.py
+        status_config = {
+            'tracks': [{
+                'track_id': 0,
+                'temperature': 0.5,
+                'instrument': 'acoustic_grand_piano', 
+                'density': 10, 
+                'track_type': 10, 
+                'ignore': False, 
+                'selected_bars': [False, False, True, False],
+                'min_polyphony_q': 'POLYPHONY_ANY',
+                'max_polyphony_q': 'POLYPHONY_ANY', 
+                'autoregressive': False,
+                'polyphony_hard_limit': 9 
+            }]
+        }
         
-        # Step D: Prepare configuration
-        print("   ⚙️ Preparing generation config...")
-        status_config, param_config = create_debug_config(temperature, model_path)
+        param_config = {
+            'tracks_per_step': 1, 
+            'bars_per_step': 1, 
+            'model_dim': 4, 
+            'percentage': 100, 
+            'batch_size': 1, 
+            'temperature': 1.0, 
+            'max_steps': 200, 
+            'polyphony_hard_limit': 6, 
+            'shuffle': True, 
+            'verbose': False,
+            'ckpt': model_path,
+            'sampling_seed': -1,
+            'mask_top_k': 0
+        }
         
-        # Convert to strings
+        # Convert to JSON strings
         piece_str = json.dumps(piece_json)
         status_str = json.dumps(status_config)
         param_str = json.dumps(param_config)
         
-        print(f"   ✅ Config prepared:")
-        print(f"      Piece: {len(piece_str)} chars")
-        print(f"      Status: {len(status_str)} chars") 
-        print(f"      Param: {len(param_str)} chars")
-        
-        # Step E: Generate with MidiGPT
-        print("   🎵 Calling MidiGPT sample_multi_step...")
+        # Generate
         callbacks = midigpt.CallbackManager()
-        
         result_tuple = midigpt.sample_multi_step(piece_str, status_str, param_str, 3, callbacks)
         
-        print(f"   ✅ Generation complete!")
-        print(f"   Result type: {type(result_tuple)}")
-        print(f"   Result length: {len(result_tuple) if hasattr(result_tuple, '__len__') else 'N/A'}")
-        
-        # Step F: Extract result
+        # Extract result
         result_json_str = result_tuple[0]
-        attempts = result_tuple[1] if len(result_tuple) > 1 else "Unknown"
         
-        print(f"   📊 Generation stats:")
-        print(f"      Attempts: {attempts}")
-        print(f"      Result JSON: {len(result_json_str)} chars")
-        print(f"      First 200 chars: {result_json_str[:200]}...")
-        
-        # Step G: Convert back to MIDI
-        print("   🔄 Converting JSON back to MIDI...")
+        # Convert back to MIDI
         output_midi_path = os.path.join(temp_dir, "output.mid")
         encoder.json_to_midi(result_json_str, output_midi_path)
         
-        # Verify output MIDI
-        verify_midi_file(output_midi_path)
+        # Extract notes
+        notes = extract_notes_from_midi(output_midi_path)
         
-        # Step H: Extract instructions
-        print("   📝 Extracting CA instructions...")
-        ca_instructions = extract_instructions_with_debug(output_midi_path)
+        return notes
         
-        return ca_instructions
-        
-    except Exception as e:
-        print(f"   ❌ Generation step failed: {e}")
-        raise
     finally:
         # Cleanup
         try:
@@ -196,315 +168,150 @@ def attempt_midigpt_generation(num_extra_ids, temperature):
         except:
             pass
 
-def verify_midi_file(midi_path):
-    """Verify MIDI file is valid and has content"""
-    try:
-        midi_file = mido.MidiFile(midi_path)
-        file_size = os.path.getsize(midi_path)
-        
-        note_count = 0
-        for track in midi_file.tracks:
-            for msg in track:
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    note_count += 1
-        
-        print(f"   📊 MIDI file stats:")
-        print(f"      File size: {file_size} bytes")
-        print(f"      Tracks: {len(midi_file.tracks)}")
-        print(f"      Notes: {note_count}")
-        print(f"      Ticks per beat: {midi_file.ticks_per_beat}")
-        
-        if note_count == 0:
-            print("   ⚠️ WARNING: MIDI file has no notes!")
-        
-    except Exception as e:
-        print(f"   ❌ MIDI verification failed: {e}")
-
-def extract_instructions_with_debug(midi_path):
-    """Extract CA instructions with detailed debugging"""
-    print(f"   🔍 Analyzing output MIDI: {midi_path}")
-    
-    try:
-        midi_file = mido.MidiFile(midi_path)
-        
-        # Count content
-        total_messages = 0
-        note_on_count = 0
-        note_off_count = 0
-        unique_pitches = set()
-        
-        for track_idx, track in enumerate(midi_file.tracks):
-            print(f"   📊 Track {track_idx}: {len(track)} messages")
-            
-            track_time = 0
-            for msg in track:
-                total_messages += 1
-                track_time += msg.time
-                
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    note_on_count += 1
-                    unique_pitches.add(msg.note)
-                elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                    note_off_count += 1
-        
-        print(f"   📊 Content analysis:")
-        print(f"      Total messages: {total_messages}")
-        print(f"      Note ONs: {note_on_count}")
-        print(f"      Note OFFs: {note_off_count}")
-        print(f"      Unique pitches: {sorted(unique_pitches)}")
-        
-        if note_on_count == 0:
-            print(f"   ❌ NO NOTES FOUND in generated MIDI!")
-            return None
-        
-        # Extract actual instructions
-        instructions = convert_midi_to_instructions_debug(midi_file)
-        
-        print(f"   ✅ Extracted {len(instructions)} instructions")
-        print(f"   📝 Instructions: {instructions[:10]}...")  # First 10
-        
-        return instructions
-        
-    except Exception as e:
-        print(f"   ❌ Instruction extraction failed: {e}")
-        return None
-
-def convert_midi_to_instructions_debug(midi_file):
-    """Convert MIDI to instructions with debug output - FIXED for multiple notes"""
-    instructions = []
-    ticks_per_beat = midi_file.ticks_per_beat or 480
-    
-    # Collect all notes
-    all_notes = []
-    
-    for track_idx, track in enumerate(midi_file.tracks):
-        track_time = 0
-        active_notes = {}
-        
-        for msg in track:
-            track_time += msg.time
-            
-            if msg.type == 'note_on' and msg.velocity > 0:
-                active_notes[msg.note] = track_time
-            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                if msg.note in active_notes:
-                    start_time = active_notes[msg.note]
-                    duration = max(240, track_time - start_time)
-                    
-                    all_notes.append({
-                        'pitch': msg.note,
-                        'start': start_time,
-                        'duration': duration
-                    })
-                    del active_notes[msg.note]
-    
-    print(f"   🎵 Found {len(all_notes)} complete notes")
-    
-    # Sort and convert to instructions
-    all_notes.sort(key=lambda n: n['start'])
-    
-    # FIXED: Create better CA format for multiple notes
-    if len(all_notes) <= 1:
-        # Single note - use simple format
-        for note in all_notes[:1]:
-            duration = min(note['duration'], 480)  # Shorter duration
-            instructions.extend([
-                f"N:{note['pitch']}",
-                f"d:{duration}",
-                f"w:{duration}"
-            ])
-    else:
-        # Multiple notes - use sequential format with shorter timing
-        for i, note in enumerate(all_notes[:6]):  # Limit to 6 notes
-            duration = min(note['duration'], 240)  # Much shorter notes
-            
-            if i == 0:
-                # First note - start immediately
-                instructions.extend([
-                    f"N:{note['pitch']}",
-                    f"d:{duration}",
-                    f"w:{duration}"  # Short wait before next note
-                ])
-            else:
-                # Subsequent notes - shorter waits
-                instructions.extend([
-                    f"N:{note['pitch']}",
-                    f"d:{duration}",
-                    f"w:{120}"  # Very short wait (1/8 note)
-                ])
-            
-            if i < 3:  # Log first few notes
-                print(f"   🎵 Note {i+1}: pitch={note['pitch']}, dur={duration}")
-    
-    print(f"   📝 Final CA format will be: {instructions[:9]}...")
-    return instructions
-
-def analyze_generation_quality(instructions):
-    """Analyze the quality of generated instructions"""
-    if not instructions:
-        return 0
-    
-    score = 0
-    
-    # Count unique pitches
-    pitches = set()
-    durations = set()
-    
-    for instr in instructions:
-        if instr.startswith('N:'):
-            pitches.add(instr)
-        elif instr.startswith('d:'):
-            durations.add(instr)
-    
-    # Quality scoring
-    if len(pitches) > 1:
-        score += 3  # Pitch variety
-    if len(pitches) > 3:
-        score += 2  # Good pitch variety
-    
-    if len(durations) > 1:
-        score += 2  # Rhythm variety
-    
-    if len(instructions) >= 9:  # At least 3 notes
-        score += 2
-    
-    if len(instructions) >= 15:  # At least 5 notes
-        score += 1
-    
-    print(f"   📊 Quality analysis:")
-    print(f"      Unique pitches: {len(pitches)}")
-    print(f"      Unique durations: {len(durations)}")
-    print(f"      Total instructions: {len(instructions)}")
-    
-    return min(score, 10)
-
-def create_debug_config(temperature, model_path):
-    """Create configuration using EXACT working values from pythoninferencetest.py"""
-    # EXACT copy from pythoninferencetest.py (with small modifications for our use case)
-    status_config = {
-        'tracks': [{
-            'track_id': 0,
-            'temperature': 0.5,  # Use working value
-            'instrument': 'acoustic_grand_piano', 
-            'density': 10,  # EXACT working value from pythoninferencetest.py
-            'track_type': 10, 
-            'ignore': False, 
-            'selected_bars': [False, False, True, False],  # EXACT working pattern
-            'min_polyphony_q': 'POLYPHONY_ANY',  # EXACT working value
-            'max_polyphony_q': 'POLYPHONY_ANY',  # EXACT working value
-            'autoregressive': False,
-            'polyphony_hard_limit': 9  # EXACT working value
-        }]
-    }
-    
-    # EXACT copy from pythoninferencetest.py
-    param_config = {
-        'tracks_per_step': 1, 
-        'bars_per_step': 1,  # EXACT working value
-        'model_dim': 4, 
-        'percentage': 100, 
-        'batch_size': 1, 
-        'temperature': 1.0,  # Use working value, ignore input temperature for now
-        'max_steps': 200,  # EXACT working value
-        'polyphony_hard_limit': 6,  # EXACT working value
-        'shuffle': True, 
-        'verbose': True,  # Enable verbose for debugging
-        'ckpt': model_path,
-        'sampling_seed': -1,
-        'mask_top_k': 0
-    }
-    
-    print(f"   ⚙️ Config settings (EXACT from pythoninferencetest.py):")
-    print(f"      Temperature: {param_config['temperature']}")
-    print(f"      Density: {status_config['tracks'][0]['density']}")
-    print(f"      Bars per step: {param_config['bars_per_step']}")
-    print(f"      Polyphony limits: {status_config['tracks'][0]['min_polyphony_q']} - {status_config['tracks'][0]['max_polyphony_q']}")
-    
-    return status_config, param_config
-
-def create_debug_midi_input(output_path, num_tokens):
-    """Create MIDI input with more musical content"""
+def create_simple_midi_input(output_path, num_notes):
+    """Create simple MIDI input"""
     mid = mido.MidiFile(ticks_per_beat=480)
     track = mido.MidiTrack()
     mid.tracks.append(track)
     
-    # Add tempo and meta
+    # Add tempo
     track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
-    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
     
-    # Add more musical seed content
-    seed_notes = [
-        (60, 480, 64),   # C quarter note
-        (64, 480, 64),   # E quarter note
-        (67, 480, 64),   # G quarter note
-        (72, 960, 64),   # C octave half note
-    ]
-    
-    current_time = 0
-    for i, (pitch, duration, velocity) in enumerate(seed_notes[:num_tokens + 1]):
-        track.append(mido.Message('note_on', note=pitch, velocity=velocity, time=current_time))
-        track.append(mido.Message('note_off', note=pitch, velocity=0, time=duration))
-        current_time = 480  # Space between notes
-    
-    # Add significant empty space for generation
-    track.append(mido.Message('note_on', note=60, velocity=0, time=3840))  # 2 bars of silence
+    # Add a couple seed notes
+    seed_pitches = [60, 64]
+    for i, pitch in enumerate(seed_pitches):
+        track.append(mido.Message('note_on', note=pitch, velocity=64, time=0 if i == 0 else 480))
+        track.append(mido.Message('note_off', note=pitch, velocity=64, time=240))
     
     mid.save(output_path)
-    print(f"   ✅ Created input MIDI with {len(seed_notes)} seed notes")
 
-def generate_enhanced_fallback(num_extra_ids):
-    """Generate better fallback content"""
-    # More interesting musical patterns
-    patterns = [
-        # Pattern 1: Simple melody
-        ["N:60", "d:480", "w:480", "N:62", "d:480", "w:480", "N:64", "d:480", "w:480"],
-        # Pattern 2: Chord progression
-        ["N:60", "d:960", "w:0", "N:64", "d:960", "w:0", "N:67", "d:960", "w:960"],
-        # Pattern 3: Rhythm pattern
-        ["N:60", "d:240", "w:240", "N:60", "d:240", "w:240", "N:64", "d:480", "w:480"]
-    ]
-    
-    pattern_idx = min(num_extra_ids - 1, len(patterns) - 1)
-    selected_pattern = patterns[pattern_idx]
-    print(f"   🎵 Selected fallback pattern {pattern_idx + 1}: {len(selected_pattern)} instructions")
-    return selected_pattern
+def extract_notes_from_midi(midi_path):
+    """Extract notes from MidiGPT's multi-track output correctly"""
+    try:
+        midi_file = mido.MidiFile(midi_path)
+        all_notes = []
+        ticks_per_beat = midi_file.ticks_per_beat or 480
+        
+        print(f"Analyzing MidiGPT output: {len(midi_file.tracks)} tracks, {ticks_per_beat} tpb")
+        
+        # Process each track separately - each track has its own timeline starting from 0
+        for track_idx, track in enumerate(midi_file.tracks):
+            track_time = 0
+            active_notes = {}
+            track_notes = []
+            
+            for msg in track:
+                track_time += msg.time
+                
+                if msg.type == 'note_on' and msg.velocity > 0:
+                    active_notes[msg.note] = track_time
+                elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                    if msg.note in active_notes:
+                        start_time = active_notes[msg.note]
+                        duration = track_time - start_time
+                        
+                        track_notes.append({
+                            'pitch': msg.note,
+                            'start': start_time,
+                            'duration': duration,
+                            'track': track_idx
+                        })
+                        del active_notes[msg.note]
+            
+            if track_notes:
+                print(f"  Track {track_idx}: {len(track_notes)} notes")
+                for note in track_notes:
+                    print(f"    pitch={note['pitch']}, start={note['start']}, dur={note['duration']}")
+            
+            all_notes.extend(track_notes)
+        
+        if not all_notes:
+            print("No notes found in any track!")
+            return []
+        
+        # Sort all notes by start time to create the final sequence
+        all_notes.sort(key=lambda n: n['start'])
+        
+        print(f"\nCombined sequence ({len(all_notes)} total notes):")
+        for i, note in enumerate(all_notes[:8]):
+            print(f"  {i+1}: pitch={note['pitch']}, start={note['start']}, dur={note['duration']}, track={note['track']}")
+        
+        return all_notes[:8]  # Limit to 8 notes
+        
+    except Exception as e:
+        print(f"MIDI extraction error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
-# Utility functions from previous version
-def extract_extra_id_tokens(input_string):
-    """Extract extra_id tokens from input string"""
-    pattern = r'<extra_id_\d+>'
-    tokens = re.findall(pattern, input_string)
-    return tokens
-
-def format_response_with_extra_ids(extra_ids, ca_instructions):
-    """Format response in the format expected by instructions_by_extra_id()"""
+def format_single_note_response(extra_ids, notes):
+    """
+    Format response using MidiGPT's actual extracted notes with proper timing
+    """
     if not extra_ids:
         extra_ids = ['<extra_id_1>']
     
-    # Split instructions evenly among extra_ids
-    instructions_per_id = max(1, len(ca_instructions) // len(extra_ids))
+    if not notes:
+        notes = [{'pitch': 60, 'start': 0, 'duration': 240}]
     
     result_parts = []
     
     for i, extra_id in enumerate(extra_ids):
-        # Add the extra_id token
         result_parts.append(extra_id)
         
-        # Add instructions for this extra_id
-        start_idx = i * instructions_per_id
-        end_idx = start_idx + instructions_per_id
+        # Distribute notes among extra_ids
+        if i == 0:
+            # First extra_id gets most of the notes
+            phrase_notes = notes[:min(len(notes), 6)]
+        else:
+            # Additional extra_ids get remaining notes
+            notes_per_id = max(1, len(notes) // len(extra_ids))
+            start_idx = i * notes_per_id
+            end_idx = min(start_idx + notes_per_id, len(notes))
+            phrase_notes = notes[start_idx:end_idx]
         
-        # For the last extra_id, include any remaining instructions
-        if i == len(extra_ids) - 1:
-            end_idx = len(ca_instructions)
+        if not phrase_notes:
+            # Fallback single note if no notes available
+            pitch = 60 + (i * 2)
+            result_parts.extend([f"N:{pitch}", "d:480", "w:480"])
+            continue
         
-        id_instructions = ca_instructions[start_idx:end_idx]
-        result_parts.extend(id_instructions)
+        # Format notes with proper timing relationships
+        current_position = 0
+        
+        for j, note in enumerate(phrase_notes):
+            pitch = note['pitch']
+            start_time = note['start']
+            duration = note['duration']
+            
+            # Calculate wait needed to reach this note's position
+            wait_needed = max(0, start_time - current_position)
+            
+            # Add wait if needed (but keep reasonable)
+            if wait_needed > 0:
+                # Cap waits to reasonable musical values
+                wait_needed = min(wait_needed, 3840)  # Max 2 measures
+                result_parts.append(f"w:{wait_needed}")
+                current_position += wait_needed
+            
+            # Add the note with its actual duration
+            duration = max(240, min(duration, 1920))  # Between 1/8 note and whole note
+            result_parts.extend([
+                f"N:{pitch}",
+                f"d:{duration}"
+            ])
+            
+            # Update current position
+            current_position = start_time
+        
+        # Add final wait equal to the last note's duration
+        if phrase_notes:
+            final_duration = max(240, min(phrase_notes[-1]['duration'], 1920))
+            result_parts.append(f"w:{final_duration}")
     
-    # Join with semicolons and ensure proper formatting
-    result = ';' + ';'.join(result_parts) + ';'
+    result = ';'.join(result_parts)
     
-    print(f"🎼 Formatted response: {result}")
+    print(f"PROPERLY EXTRACTED FORMAT: {result[:120]}...")
     return result
 
 def find_model_path():
@@ -513,7 +320,6 @@ def find_model_path():
         "../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
         "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
         "../../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-        "MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt"
     ]
     
     for path in possible_paths:
@@ -523,10 +329,10 @@ def find_model_path():
     raise FileNotFoundError("Could not find MidiGPT model checkpoint")
 
 def main():
-    print("🎵 Starting MidiGPT Production Server (FULL DEBUG)")
-    print("📡 Port: 3456")
-    print("🔍 Debug mode enabled - detailed tracing active")
-    print("✅ Ready for REAPER connections...")
+    print("Fresh MidiGPT Server - Single Note Per Extra ID")
+    print("Port: 3456")
+    print("Key insight: Each extra_id gets exactly ONE note")
+    print("Ready for REAPER connections...")
     
     # Create XML-RPC server
     server = SimpleXMLRPCServer(("127.0.0.1", 3456), 
@@ -539,7 +345,7 @@ def main():
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n🛑 Server stopped.")
+        print("\nServer stopped.")
 
 if __name__ == "__main__":
     main()
