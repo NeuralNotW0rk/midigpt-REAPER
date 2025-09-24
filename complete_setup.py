@@ -120,10 +120,10 @@ def install_core_dependencies(has_cuda=False):
     
     # Install other core dependencies - use list format to prevent shell interpretation of <>
     deps = [
-        ("numpy", "numpy>=1.21.0,<2.0"),        # Critical: constraint NumPy to 1.x
+        ("numpy", "numpy==1.26.4"),        # Critical: constraint NumPy to 1.x
         ("protobuf", "protobuf>=4.0.0"), 
         ("pybind11", "pybind11[global]>=2.12.0"),
-        ("transformers", "transformers>=4.30.0"),
+        ("transformers", "transformers==4.41.0"),
         ("cmake", "cmake>=3.16.0"),
         ("tqdm", "tqdm")
     ]

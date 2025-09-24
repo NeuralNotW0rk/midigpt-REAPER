@@ -122,6 +122,102 @@ class TimingMap:
             for measure, notes in self.notes_by_measure.items():
                 print(f"  Measure {measure}: {len(notes)} notes")
 
+def generate_instructions_by_extra_id(generated_notes, requested_extra_ids):
+    """Convert generated notes to extra_id instruction format that REAPER expects - CA-compatible format"""
+    
+    if not requested_extra_ids:
+        if DEBUG:
+            print("No extra_id tokens requested, using fallback format")
+        return {}
+    
+    if DEBUG:
+        print(f"Generating CA-compatible instructions for extra_ids: {requested_extra_ids}")
+        print(f"Distributing {len(generated_notes)} notes among {len(requested_extra_ids)} extra_ids")
+    
+    instructions_by_extra_id = {}
+    
+    if len(generated_notes) == 0:
+        # No generated notes, provide empty instructions for each extra_id
+        for extra_id in requested_extra_ids:
+            instructions_by_extra_id[f"<extra_id_{extra_id}>"] = []
+        return instructions_by_extra_id
+    
+    # Distribute notes more evenly - ensure each extra_id gets substantial content
+    min_notes_per_id = max(2, len(generated_notes) // len(requested_extra_ids))
+    note_idx = 0
+    
+    for i, extra_id in enumerate(requested_extra_ids):
+        instructions = []
+        
+        # Calculate how many notes this extra_id should get
+        if i == len(requested_extra_ids) - 1:
+            # Last extra_id gets all remaining notes
+            notes_for_this_id = len(generated_notes) - note_idx
+        else:
+            # Each extra_id gets fair share
+            available_notes = len(generated_notes) - note_idx
+            remaining_extra_ids = len(requested_extra_ids) - i
+            notes_for_this_id = max(min_notes_per_id, available_notes // remaining_extra_ids)
+        
+        # Generate instructions in CA-compatible format
+        current_position = 0
+        
+        for j in range(notes_for_this_id):
+            if note_idx < len(generated_notes):
+                note = generated_notes[note_idx]
+                
+                # CA Format: Use w: (wait) to position notes, then N: and d: for the note
+                if j > 0 or current_position > 0:
+                    # Add wait time to position this note (CA pattern)
+                    wait_time = max(120, min(480, note['duration'] // 4))  # Reasonable musical spacing
+                    instructions.append(f"w:{wait_time}")
+                    current_position += wait_time
+                
+                # Add the note in CA format: N:pitch, d:duration (NO automatic wait after)
+                instructions.extend([
+                    f"N:{note['pitch']}",
+                    f"d:{note['duration']}"
+                ])
+                
+                current_position += note['duration']
+                note_idx += 1
+        
+        if DEBUG and instructions:
+            note_count = len([inst for inst in instructions if inst.startswith('N:')])
+            print(f"  <extra_id_{extra_id}>: {note_count} notes, {len(instructions)} instructions (CA format)")
+        
+        instructions_by_extra_id[f"<extra_id_{extra_id}>"] = instructions
+    
+    # Debug summary
+    if DEBUG:
+        total_notes_assigned = sum(len([inst for inst in instructions if inst.startswith('N:')]) 
+                                 for instructions in instructions_by_extra_id.values())
+        print(f"Total notes assigned: {total_notes_assigned} out of {len(generated_notes)} generated (CA-compatible)")
+    
+    return instructions_by_extra_id
+
+def format_as_extra_id_response(instructions_by_extra_id):
+    """Convert to the CA extra_id format that REAPER expects"""
+    
+    if not instructions_by_extra_id:
+        if DEBUG:
+            print("No extra_id instructions to format")
+        return ""
+    
+    parts = []
+    
+    for extra_id, instructions in instructions_by_extra_id.items():
+        parts.append(extra_id)  # Add the token: <extra_id_151>
+        parts.extend(instructions)  # Add the instructions: N:60, d:480, w:480
+    
+    result = ";" + ";".join(parts) + ";"
+    
+    if DEBUG:
+        print(f"Formatted extra_id response: {len(result)} characters")
+        print(f"Preview: {result[:200]}...")
+    
+    return result
+
 def create_timing_preserving_midi(timing_map):
     """Create MIDI file that preserves the original project's timing structure"""
     
@@ -309,7 +405,7 @@ def process_with_midigpt(midi_file, timing_map, temperature=1.0):
         return create_fallback_midi(timing_map)
 
 def restore_original_timing_structure(generated_midi, original_timing_map):
-    """Extract notes from generated MIDI and map back to original project timing"""
+    """Extract notes from generated MIDI and format as extra_id instructions for REAPER"""
     
     # Extract all notes from generated MIDI (across all tracks)
     generated_notes = []
@@ -336,7 +432,7 @@ def restore_original_timing_structure(generated_midi, original_timing_map):
                         'pitch': msg.note,
                         'start_time': note_info['start'],
                         'end_time': current_time,
-                        'duration': duration,
+                        'duration': max(240, min(1920, duration)),  # Clamp duration to reasonable range
                         'velocity': note_info['velocity'],
                         'track': note_info['track']
                     })
@@ -344,60 +440,71 @@ def restore_original_timing_structure(generated_midi, original_timing_map):
     if DEBUG:
         print(f"Extracted {len(generated_notes)} notes from generated MIDI")
     
-    # Map generated notes back to original project timing structure
-    project_start = original_timing_map.project_start_measure
-    project_end = original_timing_map.project_end_measure
-    project_range = project_end - project_start + 1
-    project_duration_ticks = project_range * 1920  # Total project duration in ticks
+    # Check if we need extra_id format or simple CA format
+    requested_extra_ids = original_timing_map.extra_ids
     
-    # Group notes by their target measure in the original project
-    notes_by_project_measure = defaultdict(list)
-    
-    for note in generated_notes:
-        # Calculate which measure this note should go to in the original project
-        # Use modulo to wrap long generations back into the project range
-        if project_duration_ticks > 0:
-            relative_position = (note['start_time'] % project_duration_ticks) / project_duration_ticks
-            target_measure = project_start + int(relative_position * project_range)
-        else:
-            target_measure = project_start
+    if requested_extra_ids:
+        # REAPER sent extra_id tokens - use extra_id instruction format
+        if DEBUG:
+            print(f"Using extra_id format for tokens: {requested_extra_ids}")
         
-        # Ensure we stay within project bounds
-        target_measure = max(project_start, min(project_end, target_measure))
+        instructions_by_extra_id = generate_instructions_by_extra_id(generated_notes, requested_extra_ids)
+        result_ca = format_as_extra_id_response(instructions_by_extra_id)
         
-        # Calculate position within the target measure
-        measure_position = note['start_time'] % 1920  # Position within measure
+    else:
+        # No extra_id tokens - use simple measure-based CA format (fallback)
+        if DEBUG:
+            print("No extra_id tokens found, using simple measure-based format")
         
-        notes_by_project_measure[target_measure].append({
-            'pitch': note['pitch'],
-            'duration': note['duration'],
-            'position_in_measure': measure_position,
-            'velocity': note['velocity']
-        })
-    
-    # Convert back to CA format with original project measures
-    ca_parts = []
-    
-    # Sort measures to ensure consistent output
-    for measure in sorted(notes_by_project_measure.keys()):
-        measure_notes = notes_by_project_measure[measure]
+        # Map generated notes back to original project timing structure  
+        project_start = original_timing_map.project_start_measure
+        project_end = original_timing_map.project_end_measure
+        project_range = project_end - project_start + 1
+        project_duration_ticks = project_range * 1920
         
-        # Sort notes within measure by position
-        measure_notes.sort(key=lambda n: n['position_in_measure'])
+        # Group notes by their target measure in the original project
+        notes_by_project_measure = defaultdict(list)
         
-        for note in measure_notes:
-            ca_parts.extend([
-                f"M:{measure}",
-                f"N:{note['pitch']}",
-                f"d:{max(240, min(1920, int(note['duration'])))}",  # Clamp duration to reasonable range
-                f"w:{max(240, min(1920, int(note['duration'])))}"
-            ])
-    
-    result_ca = ";" + ";".join(ca_parts) + ";"
+        for note in generated_notes:
+            # Calculate which measure this note should go to in the original project
+            if project_duration_ticks > 0:
+                relative_position = (note['start_time'] % project_duration_ticks) / project_duration_ticks
+                target_measure = project_start + int(relative_position * project_range)
+            else:
+                target_measure = project_start
+            
+            # Ensure we stay within project bounds
+            target_measure = max(project_start, min(project_end, target_measure))
+            
+            notes_by_project_measure[target_measure].append({
+                'pitch': note['pitch'],
+                'duration': note['duration'],
+                'velocity': note['velocity']
+            })
+        
+        # Convert back to CA format with original project measures
+        ca_parts = []
+        
+        # Sort measures to ensure consistent output
+        for measure in sorted(notes_by_project_measure.keys()):
+            measure_notes = notes_by_project_measure[measure]
+            
+            for note in measure_notes:
+                ca_parts.extend([
+                    f"M:{measure}",
+                    f"N:{note['pitch']}",
+                    f"d:{note['duration']}",
+                    f"w:{note['duration']}"
+                ])
+        
+        result_ca = ";" + ";".join(ca_parts) + ";"
     
     if DEBUG:
         print(f"Generated CA result: {len(result_ca)} characters")
-        print(f"Result measures: {sorted(notes_by_project_measure.keys())}")
+        if requested_extra_ids:
+            print(f"Extra_ID format with {len(requested_extra_ids)} tokens")
+        else:
+            print(f"Measure-based format")
         print(f"CA preview: {result_ca[:200]}...")
     
     return result_ca

@@ -1,167 +1,223 @@
-# REAPER Debug Script - Run this in REAPER to debug note display issue
-# Save as: REAPER_debug_note_display.py
+#!/usr/bin/env python3
+"""
+REAPER Note Writing Debug Script v2.0
+Focus: Diagnose why generated notes aren't appearing in REAPER
+Architecture: Test CA format parsing and note insertion mechanisms
+"""
 
-import rpr_ca_functions as fn
-import rpr_midigpt_functions as midigpt_fn
-from reaper_python import *
 import sys
+import os
 
-def patch_stdout_stderr_open():
-    global open, original_open, reaper_console
+# Add current directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(current_dir)
 
-    class ReaperConsole:
-        def write(self, output):
-            RPR_ShowConsoleMsg(output)
+try:
+    import reapy as rpr
+    from rpr_midigpt_functions import get_global_options
+    import preprocessing_functions as pre
+except ImportError as e:
+    print(f"Import error: {e}")
+    print("Ensure all required modules are available")
+    sys.exit(1)
 
-        def flush(self):
-            pass
-
-        def close(self):
-            pass
-
-    reaper_console = ReaperConsole()
-    sys.stdout = reaper_console
-    sys.stderr = reaper_console
-
-    original_open = open
-    open = lambda *args, **kwargs: reaper_console
-
-patch_stdout_stderr_open()
-
-def debug_note_display_issue():
-    """Debug why notes aren't appearing in REAPER after MidiGPT generation"""
+def debug_ca_format_parsing():
+    """Test CA format parsing with actual server output"""
+    print("1. CA Format Parsing Test")
     
-    print("=== DEBUGGING NOTE DISPLAY ISSUE ===")
-    RPR_ClearConsole()
+    # Test simple format
+    simple_ca = ";M:0;N:60;d:1920;w:1920;M:1;N:64;d:1920;w:1920;"
+    print(f"   Simple CA: {simple_ca}")
     
-    # Force debug mode
-    fn.DEBUG = True
+    # Test complex format (actual server output)
+    complex_ca = ";M:0;N:60;d:1920;w:1920;M:1;N:64;d:1920;w:1920;M:3;N:67;d:1920;w:1920;M:9;N:64;d:1920;w:1920;M:10;N:62;d:1920;w:1920;"
+    print(f"   Complex CA: {complex_ca[:80]}...")
     
-    print("1. Testing MidiGPT options...")
+    return complex_ca
+
+def debug_reaper_state():
+    """Check REAPER project state and selected items"""
+    print("2. REAPER State Analysis")
+    
     try:
-        options = midigpt_fn.get_global_options()
-        print(f"   Temperature: {options.temperature}")
-        print(f"   Enc no repeat ngram size: {options.enc_no_repeat_ngram_size}")
-        print(f"   Generated notes are selected: {options.generated_notes_are_selected}")
-        print(f"   Display warnings: {options.display_warnings}")
-    except Exception as e:
-        print(f"   ERROR loading MidiGPT options: {e}")
-        return
-    
-    print("\n2. Getting project input...")
-    try:
-        nn_input = fn.get_nn_input_from_project(
-            mask_empty_midi_items=True, 
-            mask_selected_midi_items=True,
-            do_rhythmic_conditioning=options.do_rhythm_conditioning,
-            rhythmic_conditioning_type=options.rhythm_conditioning_type,
-            do_note_range_conditioning_by_measure=options.do_note_range_conditioning,
-            note_range_conditioning_type=options.note_range_conditioning_type,
-            display_track_to_MIDI_inst=options.display_track_to_MIDI_inst,
-            display_warnings=options.display_warnings
-        )
-        print(f"   Continue: {nn_input.continue_}")
-        if nn_input.continue_:
-            print(f"   Input string length: {len(nn_input.nn_input_string)}")
-            print(f"   Input preview: {nn_input.nn_input_string[:100]}...")
-            print(f"   Start measure: {nn_input.start_measure}")
-            print(f"   End measure: {nn_input.end_measure}")
+        project = rpr.Project()
+        print(f"   Project length: {project.length:.2f} seconds")
+        print(f"   Time signature: {project.time_signature}")
+        
+        # Check selected items
+        selected_items = [item for item in project.items if item.is_selected]
+        print(f"   Selected items: {len(selected_items)}")
+        
+        if selected_items:
+            item = selected_items[0]
+            print(f"   First item: {item.name or 'unnamed'}")
+            print(f"   Item length: {item.length:.2f} seconds")
+            
+            # Check takes
+            takes = list(item.takes)
+            print(f"   Takes: {len(takes)}")
+            
+            if takes:
+                take = takes[0]
+                print(f"   Active take: {take.name or 'unnamed'}")
+                return take
         else:
-            print("   No continuation needed - no masked items found")
-            return
+            print("   WARNING: No selected items found")
             
     except Exception as e:
-        print(f"   ERROR getting project input: {e}")
-        return
+        print(f"   REAPER state error: {e}")
     
-    print("\n3. Testing server call...")
-    try:
-        use_sampling = "None" if not fn.ALWAYS_TOP_P else True
-        print(f"   Calling server with sampling: {use_sampling}")
-        
-        nn_output = fn.call_nn_infill(
-            s=nn_input.nn_input_string,
-            S=nn_input.S,
-            use_sampling=use_sampling,
-            min_length=2,
-            enc_no_repeat_ngram_size=options.enc_no_repeat_ngram_size,
-            has_fully_masked_inst=nn_input.has_fully_masked_inst,
-            temperature=options.temperature
-        )
-        
-        print(f"   Server response type: {type(nn_output)}")
-        print(f"   Server response length: {len(str(nn_output))}")
-        print(f"   Server response preview: {str(nn_output)[:200]}...")
-        
-        if not nn_output or str(nn_output).strip() == "":
-            print("   ERROR: Server returned empty response!")
-            return
-            
-    except Exception as e:
-        print(f"   ERROR calling server: {e}")
-        return
-    
-    print("\n4. Testing direct note writing with simple string...")
-    try:
-        # Test with a very simple known-good CA string
-        simple_test = ";M:0;N:60;d:1920;w:1920;M:1;N:64;d:1920;w:1920;"
-        print(f"   Testing with simple string: {simple_test}")
-        
-        # Get current selected items count
-        num_items_before = RPR_CountSelectedMediaItems(0)
-        print(f"   Selected MIDI items before: {num_items_before}")
-        
-        fn.write_nn_output_to_project(
-            nn_output=simple_test, 
-            nn_input_obj=nn_input,
-            notes_are_selected=True,
-            use_vels_from_tr_measures=False
-        )
-        
-        # Check if anything changed
-        num_items_after = RPR_CountSelectedMediaItems(0)
-        print(f"   Selected MIDI items after: {num_items_after}")
-        
-        print("   Simple test completed - check if notes appeared")
-        
-    except Exception as e:
-        print(f"   ERROR in simple note writing test: {e}")
-    
-    print("\n5. Testing with actual server output...")
-    try:
-        print("   Writing server output to project...")
-        
-        fn.write_nn_output_to_project(
-            nn_output=nn_output, 
-            nn_input_obj=nn_input,
-            notes_are_selected=options.generated_notes_are_selected,
-            use_vels_from_tr_measures=options.do_rhythm_conditioning
-        )
-        
-        print("   Server output writing completed - check if notes appeared")
-        
-    except Exception as e:
-        print(f"   ERROR writing server output: {e}")
-        import traceback
-        print(f"   Full traceback: {traceback.format_exc()}")
-    
-    print("\n6. Comparing parameters with CA system...")
-    try:
-        # Get CA options for comparison
-        ca_options = fn.get_global_options()  # This gets CA options, not MidiGPT
-        print(f"   CA enc_no_repeat_ngram_size: {ca_options.enc_no_repeat_ngram_size}")
-        print(f"   MidiGPT enc_no_repeat_ngram_size: {options.enc_no_repeat_ngram_size}")
-        
-        if ca_options.enc_no_repeat_ngram_size != options.enc_no_repeat_ngram_size:
-            print("   WARNING: Different ngram size values detected!")
-            
-    except Exception as e:
-        print(f"   ERROR comparing with CA system: {e}")
-    
-    print("\n=== DEBUG SESSION COMPLETE ===")
-    print("Check REAPER project for any new notes that appeared during tests")
+    return None
 
-if __name__ == '__main__':
-    debug_note_display_issue()
+def test_direct_note_insertion(take, ca_string):
+    """Test direct note insertion using REAPER API"""
+    print("3. Direct Note Insertion Test")
+    
+    if not take:
+        print("   ERROR: No take available for testing")
+        return
+        
+    try:
+        # Get initial note count
+        initial_notes = len(list(take.midi.notes))
+        print(f"   Initial notes: {initial_notes}")
+        
+        # Parse CA string manually
+        notes_to_add = parse_ca_string(ca_string)
+        print(f"   Parsed notes: {len(notes_to_add)}")
+        
+        # Add notes directly via REAPER API
+        for note_data in notes_to_add[:3]:  # Test first 3 notes only
+            try:
+                start_ppq = note_data['start_ppq']
+                end_ppq = start_ppq + note_data['duration_ppq']
+                pitch = note_data['pitch']
+                velocity = note_data.get('velocity', 96)
+                
+                # Create note using reapy
+                take.midi.notes.create(
+                    start=start_ppq,
+                    end=end_ppq, 
+                    pitch=pitch,
+                    velocity=velocity
+                )
+                print(f"   Added note: pitch={pitch}, start={start_ppq}")
+                
+            except Exception as e:
+                print(f"   Note creation error: {e}")
+        
+        # Check final note count
+        final_notes = len(list(take.midi.notes))
+        print(f"   Final notes: {final_notes}")
+        print(f"   Net change: +{final_notes - initial_notes}")
+        
+    except Exception as e:
+        print(f"   Direct insertion error: {e}")
 
-RPR_Undo_OnStateChange('Debug_Note_Display')
+def parse_ca_string(ca_string):
+    """Parse CA format string into note data"""
+    notes = []
+    segments = ca_string.split(';')
+    
+    current_measure = 0
+    current_pitch = None
+    current_duration = None
+    
+    for segment in segments:
+        if not segment:
+            continue
+            
+        if segment.startswith('M:'):
+            current_measure = int(segment[2:])
+        elif segment.startswith('N:'):
+            current_pitch = int(segment[2:])
+        elif segment.startswith('d:'):
+            current_duration = int(segment[2:])
+        elif segment.startswith('w:') and current_pitch and current_duration:
+            # Calculate PPQ timing (assuming 480 PPQ per quarter note)
+            start_ppq = current_measure * 1920  # 4 quarter notes per measure
+            
+            note = {
+                'measure': current_measure,
+                'pitch': current_pitch,
+                'start_ppq': start_ppq,
+                'duration_ppq': current_duration,
+                'velocity': 96
+            }
+            notes.append(note)
+            
+            # Reset for next note
+            current_pitch = None
+            current_duration = None
+    
+    return notes
+
+def test_write_function_integration():
+    """Test integration with write_nn_output_to_project if available"""
+    print("4. Write Function Integration Test")
+    
+    try:
+        # Check if write function exists
+        if hasattr(pre, 'write_nn_output_to_project'):
+            print("   write_nn_output_to_project found")
+            # Test with simple CA string
+            test_ca = ";M:0;N:72;d:960;w:960;"
+            result = pre.write_nn_output_to_project(test_ca)
+            print(f"   Function result: {result}")
+        else:
+            print("   write_nn_output_to_project not found in preprocessing_functions")
+            
+        # Check available functions
+        pre_functions = [f for f in dir(pre) if not f.startswith('_')]
+        print(f"   Available functions: {', '.join(pre_functions[:5])}...")
+        
+    except Exception as e:
+        print(f"   Write function test error: {e}")
+
+def compare_with_working_system():
+    """Compare with Composer's Assistant approach"""
+    print("5. CA System Comparison")
+    
+    try:
+        # Test global options
+        midigpt_options = get_global_options()
+        print(f"   MidiGPT temperature: {midigpt_options.temperature}")
+        print(f"   MidiGPT ngram size: {midigpt_options.enc_no_repeat_ngram_size}")
+        print("   Options loaded successfully")
+        
+    except Exception as e:
+        print(f"   Options comparison error: {e}")
+
+def main():
+    print("=== REAPER Note Writing Debug v2.0 ===")
+    print("Focus: Diagnose note appearance issues")
+    print()
+    
+    # Test CA format parsing
+    ca_string = debug_ca_format_parsing()
+    print()
+    
+    # Analyze REAPER state
+    take = debug_reaper_state()
+    print()
+    
+    # Test direct note insertion
+    test_direct_note_insertion(take, ca_string)
+    print()
+    
+    # Test write function integration
+    test_write_function_integration()
+    print()
+    
+    # Compare with working system
+    compare_with_working_system()
+    print()
+    
+    print("=== DEBUG COMPLETE ===")
+    print("Next steps:")
+    print("1. Check if direct API insertion worked")
+    print("2. Compare CA format variations")
+    print("3. Investigate write_nn_output_to_project implementation")
+
+if __name__ == "__main__":
+    main()
