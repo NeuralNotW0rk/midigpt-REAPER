@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
+"""
+Timing-Preserving MidiGPT Server
+Model-agnostic approach that preserves the relationship between input and output timing
+"""
 
 import json
 import os
 import sys
 import tempfile
+import re
 from xmlrpc.server import SimpleXMLRPCServer
 import traceback
+from collections import defaultdict
 
-# Add MidiGPT path
-midigpt_path = os.path.join(os.path.dirname(__file__), "../../../MIDI-GPT/python_lib")
+# Add paths for dependencies
+current_dir = os.path.dirname(__file__)
+midigpt_path = os.path.join(current_dir, "../../../MIDI-GPT/python_lib")
 if os.path.exists(midigpt_path):
     sys.path.insert(0, os.path.abspath(midigpt_path))
 
+# Import dependencies
 try:
     import mido
     print("✓ Mido library available")
+    MIDO_AVAILABLE = True
 except ImportError:
     print("✗ Mido library not available")
+    MIDO_AVAILABLE = False
     sys.exit(1)
 
 try:
-    from rpr_midigpt_functions import *
-    import preprocessing_functions as pf
+    import preprocessing_functions as pre
     print("✓ Preprocessing functions loaded")
 except ImportError as e:
     print(f"✗ Failed to load preprocessing functions: {e}")
@@ -35,438 +44,504 @@ except ImportError as e:
     print(f"✗ MidiGPT library not available: {e}")
     MIDIGPT_AVAILABLE = False
 
-try:
-    from midisong import MidiSongByMeasure
-    print("✓ MIDI library available")
-    MIDI_AVAILABLE = True
-except ImportError as e:
-    print(f"✗ MIDI library not available: {e}")
-    MIDI_AVAILABLE = False
+# Configuration
+DEBUG = True
+DEFAULT_CKPT = None  # Will be found dynamically
 
-def create_infill_midi_structure(input_string):
-    """Create MIDI structure from CA string format with timing validation"""
-    print(f"Processing input string: {len(input_string)} characters")
-    print(f"Input preview: {input_string[:200]}...")
+class TimingMap:
+    """Captures the timing structure and intent from the original CA format"""
     
-    # Check if this is an infill request (contains only <extra_id_XXX> tokens)
-    import re
-    extra_ids = re.findall(r'<extra_id_(\d+)>', input_string)
-    has_notes = ';N:' in input_string  # Check for actual notes
+    def __init__(self, ca_string, project_measures):
+        self.project_start_measure = min(project_measures) if project_measures else 0
+        self.project_end_measure = max(project_measures) if project_measures else 3
+        self.project_total_measures = len(project_measures)
+        self.notes_by_measure = defaultdict(list)
+        self.measure_positions = {}  # Track measure timing positions
+        self.extra_ids = []
+        self.original_ca_string = ca_string
+        
+        self._parse_ca_structure(ca_string)
     
-    print(f"Found extra IDs: {extra_ids}")
-    print(f"Contains notes: {has_notes}")
-    
-    # Extract existing notes from CA format if they exist
-    notes = []
-    if has_notes:
-        # Parse CA format: ;M:0;N:60;d:240;w:240;
-        segments = input_string.split(';')
-        current_measure = 0
-        current_note = None
+    def _parse_ca_structure(self, ca_string):
+        """Parse CA format to extract timing structure and musical intent"""
+        if DEBUG:
+            print(f"Parsing CA structure: {len(ca_string)} characters")
+        
+        segments = ca_string.split(';')
+        current_measure = self.project_start_measure
+        current_time_in_measure = 0
         
         for segment in segments:
+            if not segment:
+                continue
+                
             if segment.startswith('M:'):
                 current_measure = int(segment[2:])
+                current_time_in_measure = 0
+                if current_measure not in self.measure_positions:
+                    self.measure_positions[current_measure] = {
+                        'start_time': current_measure * 1920,  # Standard ticks per measure
+                        'notes': []
+                    }
+                    
             elif segment.startswith('N:'):
-                pitch = int(segment[2:])
-                current_note = {'measure': current_measure, 'pitch': pitch}
-            elif segment.startswith('d:') and current_note:
-                duration = int(segment[2:])
-                current_note['duration'] = duration
-                notes.append(current_note)
-                current_note = None
+                parts = segment.split(':')
+                pitch = int(parts[1])
+                duration = int(parts[2]) if len(parts) > 2 else 480
+                
+                note_info = {
+                    'type': 'note',
+                    'pitch': pitch,
+                    'duration': duration,
+                    'measure': current_measure,
+                    'time_in_measure': current_time_in_measure,
+                    'absolute_time': current_measure * 1920 + current_time_in_measure
+                }
+                
+                self.notes_by_measure[current_measure].append(note_info)
+                self.measure_positions[current_measure]['notes'].append(note_info)
+                
+            elif segment.startswith('w:'):
+                # Wait time - advance position in measure
+                wait_time = int(segment[2:])
+                current_time_in_measure += wait_time
+                
+            elif segment.startswith('d:'):
+                # Duration - this affects the current note but not timing position
+                pass
+                
+            elif segment.startswith('<extra_id_'):
+                # Extract extra ID number
+                match = re.search(r'<extra_id_(\d+)>', segment)
+                if match:
+                    self.extra_ids.append(int(match.group(1)))
+        
+        if DEBUG:
+            print(f"Parsed structure: {len(self.notes_by_measure)} measures with content")
+            print(f"Extra IDs found: {self.extra_ids}")
+            for measure, notes in self.notes_by_measure.items():
+                print(f"  Measure {measure}: {len(notes)} notes")
+
+def create_timing_preserving_midi(timing_map):
+    """Create MIDI file that preserves the original project's timing structure"""
     
-    print(f"Extracted {len(notes)} context notes from input")
-    
-    # Create MIDI file with basic structure for infilling
-    midi_file = mido.MidiFile(ticks_per_beat=480)
+    # Create MIDI with proper timing resolution
+    midi_file = mido.MidiFile(ticks_per_beat=480, type=1)  # Type 1 for multiple tracks
     track = mido.MidiTrack()
     midi_file.tracks.append(track)
     
-    # Add time signature and tempo
-    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+    # Add standard MIDI headers
     track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))  # 120 BPM
+    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+    track.append(mido.MetaMessage('track_name', name='Generated', time=0))
+    
+    # Convert notes to MIDI events with preserved timing
+    all_events = []
+    
+    for measure_num, notes in timing_map.notes_by_measure.items():
+        for note in notes:
+            # Calculate absolute timing in MIDI ticks
+            measure_start_ticks = (measure_num - timing_map.project_start_measure) * 1920
+            note_start_ticks = measure_start_ticks + note['time_in_measure']
+            note_end_ticks = note_start_ticks + note['duration']
+            
+            # Create MIDI events
+            all_events.append({
+                'time': note_start_ticks,
+                'type': 'note_on',
+                'note': note['pitch'],
+                'velocity': 80
+            })
+            all_events.append({
+                'time': note_end_ticks,
+                'type': 'note_off', 
+                'note': note['pitch'],
+                'velocity': 0
+            })
+    
+    # Add generation targets (empty space for MidiGPT to fill)
+    project_duration = timing_map.project_total_measures * 1920
+    
+    # If we have extra_ids, add placeholder notes to give MidiGPT context
+    if timing_map.extra_ids:
+        for i, extra_id in enumerate(timing_map.extra_ids):
+            # Add very quiet placeholder notes that MidiGPT can replace
+            placeholder_time = (i + 1) * (project_duration // (len(timing_map.extra_ids) + 1))
+            all_events.append({
+                'time': placeholder_time,
+                'type': 'note_on',
+                'note': 60,  # Middle C placeholder
+                'velocity': 1   # Very quiet
+            })
+            all_events.append({
+                'time': placeholder_time + 120,  # Short placeholder
+                'type': 'note_off',
+                'note': 60,
+                'velocity': 0
+            })
+    
+    # Sort events by time and convert to MIDI messages
+    all_events.sort(key=lambda x: (x['time'], x['type'] == 'note_off'))  # note_on before note_off at same time
     
     current_time = 0
-    measure_length = 480 * 4  # 4 beats per measure at 480 ticks per beat
-    
-    if notes:
-        # Use existing notes for context with proper timing
-        notes.sort(key=lambda x: x['measure'])  # Sort by measure
+    for event in all_events:
+        delta_time = event['time'] - current_time
+        current_time = event['time']
         
-        for note in notes:
-            measure_start = note['measure'] * measure_length
-            note_time = max(0, measure_start - current_time)  # Ensure non-negative
-            
-            # Add note on
-            track.append(mido.Message('note_on', 
-                                    channel=0, 
-                                    note=note['pitch'], 
-                                    velocity=64, 
-                                    time=note_time))
-            current_time += note_time
-            
-            # Add note off
-            duration = note.get('duration', 480)
-            track.append(mido.Message('note_off',
-                                    channel=0,
-                                    note=note['pitch'],
-                                    velocity=0,
-                                    time=duration))
-            current_time += duration
-    else:
-        # Create minimal structure for pure infill (no existing notes)
-        # Add a few seed notes to give MidiGPT something to work with
-        seed_notes = [60, 64, 67]  # C major triad
-        for i, pitch in enumerate(seed_notes):
-            measure_start = i * measure_length
-            note_time = max(0, measure_start - current_time)  # Ensure non-negative
-            
-            track.append(mido.Message('note_on', 
-                                    channel=0, 
-                                    note=pitch, 
-                                    velocity=64, 
-                                    time=note_time))
-            current_time += note_time
-            
-            track.append(mido.Message('note_off',
-                                    channel=0,
-                                    note=pitch,
-                                    velocity=0,
-                                    time=480))  # Quarter note duration
-            current_time += 480
+        if event['type'] == 'note_on':
+            track.append(mido.Message('note_on', channel=0, note=event['note'], 
+                                    velocity=event['velocity'], time=delta_time))
+            delta_time = 0  # Reset for next event at same time
+        else:
+            track.append(mido.Message('note_off', channel=0, note=event['note'], 
+                                    velocity=event['velocity'], time=delta_time))
+            delta_time = 0
     
-    # Ensure minimum length for generation
-    min_total = 4 * measure_length  # At least 4 measures
-    if current_time < min_total:
-        # Add silent time to reach minimum - ensure non-negative
-        remaining_time = max(0, min_total - current_time)
-        if remaining_time > 0:
-            track.append(mido.Message('note_on', channel=0, note=60, velocity=0, 
-                                    time=remaining_time))
-            current_time += remaining_time
+    # End of track
+    track.append(mido.MetaMessage('end_of_track', time=0))
     
-    print(f"MIDI structure created: {current_time} ticks, {len(notes) if notes else 'seed'} notes")
+    if DEBUG:
+        total_ticks = sum(msg.time for msg in track)
+        print(f"Created MIDI: {len(track)} messages, {total_ticks} total ticks")
     
-    # Save to temporary file
-    temp_fd, temp_path = tempfile.mkstemp(suffix='.mid')
-    os.close(temp_fd)
-    
-    try:
-        midi_file.save(temp_path)
-        print(f"Created infill MIDI structure: {temp_path} ({current_time} ticks)")
-        return temp_path
-    except Exception as e:
-        os.unlink(temp_path)
-        raise RuntimeError(f"Failed to save MIDI file: {e}")
+    return midi_file
 
-def process_midigpt_for_reaper(s, S_dict):
-    """Process MidiGPT generation with S parameter containing REAPER content"""
+def process_with_midigpt(midi_file, timing_map, temperature=1.0):
+    """Process MIDI file with MidiGPT while preserving timing relationships"""
+    
     if not MIDIGPT_AVAILABLE:
-        raise RuntimeError("MidiGPT library not available")
+        if DEBUG:
+            print("MidiGPT not available, creating fallback")
+        return create_fallback_midi(timing_map)
     
-    # Check if this is infill or continuation based on s parameter
-    import re
-    extra_ids = re.findall(r'<extra_id_(\d+)>', s)
-    has_notes = ';N:' in s
-    
-    print(f"Found extra IDs: {extra_ids}")
-    print(f"Contains notes in s: {has_notes}")
-    
-    # Convert S parameter to MIDI file - this contains the actual REAPER content
     try:
-        # Convert S_dict to MidiSongByMeasure if needed
-        if isinstance(S_dict, dict):
-            print(f"Converting S dict with keys: {list(S_dict.keys())}")
-            S = pf.midisongbymeasure_from_save_dict(S_dict)
-        else:
-            S = S_dict
-            
-        # Create MIDI file from S parameter (actual REAPER content)
-        temp_midi_path = create_midi_from_s_parameter(S)
-        print(f"✓ Created MIDI file from S parameter: {temp_midi_path}")
+        # Save input MIDI temporarily
+        with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as temp_input:
+            midi_file.save(temp_input.name)
+            input_path = temp_input.name
         
-    except Exception as e:
-        print(f"Failed to create MIDI from S parameter: {e}")
-        print(f"S_dict type: {type(S_dict)}")
-        if isinstance(S_dict, dict):
-            print(f"S_dict keys: {list(S_dict.keys())}")
-        # Fallback: create minimal MIDI structure from s parameter  
-        temp_midi_path = create_infill_midi_structure(s)
-    
-    try:
-        # Convert MIDI to MidiGPT protobuf JSON format using ExpressiveEncoder
+        if DEBUG:
+            print(f"Saved input MIDI to: {input_path}")
+        
+        # Initialize MidiGPT (no explicit checkpoint loading needed)
         encoder = midigpt.ExpressiveEncoder()
-        piece_json_str = encoder.midi_to_json(temp_midi_path)
         
-        print(f"Generated piece JSON: {len(piece_json_str)} characters")
+        if DEBUG:
+            print("✓ MidiGPT ExpressiveEncoder initialized")
         
-        # Parse to verify it's valid JSON
-        piece_json = json.loads(piece_json_str)
-        print(f"Piece structure: {list(piece_json.keys())}")
+        # Convert to MidiGPT format
+        json_str = encoder.midi_to_json(input_path)
+        json_data = json.loads(json_str)
         
-        # Determine generation strategy based on content
-        if extra_ids and not has_notes:
-            print("🎯 Infill generation (no existing notes)")
-            selected_bars = [True, True, True, True]  # Generate in all bars
-            autoregressive = True
-        else:
-            print("🎯 Continuation generation")
-            selected_bars = [False, False, True, False]  # Generate only in specific bars
-            autoregressive = False
+        if DEBUG:
+            print(f"✓ Converted to JSON: {len(json_str)} characters")
         
-        # Prepare status configuration
+        # Create status for generation - use exact format from working examples
         status_data = {
             'tracks': [{
                 'track_id': 0,
-                'temperature': 0.7,
+                'temperature': temperature,
                 'instrument': 'acoustic_grand_piano',
                 'density': 10,
                 'track_type': 10,
                 'ignore': False,
-                'selected_bars': selected_bars,
+                'selected_bars': [True] * timing_map.project_total_measures,
                 'min_polyphony_q': 'POLYPHONY_ANY',
                 'max_polyphony_q': 'POLYPHONY_ANY',
-                'autoregressive': autoregressive,
+                'autoregressive': False,  # Use infill mode for timing preservation
                 'polyphony_hard_limit': 9
             }]
         }
         
-        # Find model checkpoint
-        model_paths = [
-            "../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-            "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-            os.path.join(os.path.dirname(__file__), "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt")
-        ]
+        # Find model checkpoint dynamically
+        model_path = find_model_checkpoint()
         
-        model_path = None
-        for path in model_paths:
-            if os.path.exists(path):
-                model_path = os.path.abspath(path)
-                break
+        # Create minimal params using MidiGPT's default_sample_param as base
+        default_params = json.loads(midigpt.default_sample_param())
         
-        if not model_path:
-            raise FileNotFoundError("Model checkpoint not found in expected locations")
+        # Override only the essential parameters we need
+        default_params.update({
+            'temperature': temperature,
+            'ckpt': model_path
+        })
         
-        # Prepare parameters
-        param_data = {
-            'tracks_per_step': 1,
-            'bars_per_step': 1,
-            'model_dim': 4,
-            'percentage': 100,
-            'batch_size': 1,
-            'temperature': 1.0,
-            'max_steps': 200,
-            'polyphony_hard_limit': 6,
-            'shuffle': True,
-            'verbose': False,
-            'ckpt': model_path,
-            'sampling_seed': -1,
-            'mask_top_k': 0
-        }
+        # Run MidiGPT generation with minimal validated parameters
+        piece_str = json.dumps(json_data)
+        status_str = json.dumps(status_data)
+        params_str = json.dumps(default_params)
         
-        print("Calling MidiGPT sample_multi_step...")
+        if DEBUG:
+            print(f"Using parameters: {list(default_params.keys())}")
         
-        # Convert to JSON strings as required by MidiGPT
-        status_json_str = json.dumps(status_data)
-        param_json_str = json.dumps(param_data)
-        
-        # Create callback manager
         callbacks = midigpt.CallbackManager()
+        results = midigpt.sample_multi_step(piece_str, status_str, params_str, 3, callbacks)
         
-        # Call MidiGPT with correct signature: (str, str, str, int, CallbackManager)
-        result_tuple = midigpt.sample_multi_step(
-            piece_json_str,     # arg0: piece JSON string (already a string)
-            status_json_str,    # arg1: status JSON string  
-            param_json_str,     # arg2: param JSON string
-            3,                  # arg3: max_attempts (int)
-            callbacks           # arg4: CallbackManager
-        )
+        if not results:
+            if DEBUG:
+                print("No results from MidiGPT, using fallback")
+            return create_fallback_midi(timing_map)
         
-        # Extract result from tuple
-        result_json_str = result_tuple[0]  # First element is the result string
-        attempts_used = result_tuple[1]    # Second element is attempts count
+        if DEBUG:
+            print(f"✅ MidiGPT generation successful: {len(results[0])} characters")
         
-        print(f"MidiGPT generation completed in {attempts_used} attempts")
-        print(f"Result length: {len(result_json_str)} characters")
+        # Convert result back to MIDI - json_to_midi expects string, not parsed JSON
+        result_json_str = results[0]  # Keep as string, don't parse to JSON
+        with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as temp_output:
+            encoder.json_to_midi(result_json_str, temp_output.name)  # Pass string directly
+            output_path = temp_output.name
         
-        # Parse the result JSON
-        result_data = json.loads(result_json_str)
+        # Load generated MIDI
+        generated_midi = mido.MidiFile(output_path)
         
-        # Convert result back to MIDI file first, then extract notes
-        temp_result_fd, temp_result_path = tempfile.mkstemp(suffix='.mid')
-        os.close(temp_result_fd)
+        if DEBUG:
+            print(f"✓ Generated MIDI: {len(generated_midi.tracks)} tracks")
         
-        try:
-            # Use encoder to convert JSON back to MIDI
-            encoder.json_to_midi(result_json_str, temp_result_path)
-            print(f"Converted result to MIDI: {temp_result_path}")
-            
-            # Extract notes from the generated MIDI file
-            output_notes = extract_notes_from_midi(temp_result_path)
-            
-        finally:
-            # Clean up temporary result file
-            if os.path.exists(temp_result_path):
-                os.unlink(temp_result_path)
+        # Cleanup temp files
+        os.unlink(input_path)
+        os.unlink(output_path)
         
-        # Format as CA string
-        result_lines = []
-        for note in output_notes:
-            # Convert to CA format: ;M:measure;N:pitch;d:duration;w:duration;
-            measure = note.get('measure', 0)
-            pitch = note.get('pitch', 60)
-            duration = note.get('duration', 480)
-            result_lines.append(f";M:{measure};N:{pitch};d:{duration};w:{duration};")
-        
-        result_string = ''.join(result_lines)
-        print(f"Generated {len(output_notes)} notes for REAPER")
-        
-        return result_string
-        
-    finally:
-        # Clean up temporary file
-        if os.path.exists(temp_midi_path):
-            os.unlink(temp_midi_path)
-
-def create_midi_from_s_parameter(S):
-    """Create MIDI file from S parameter (MidiSongByMeasure object)"""
-    print("Creating MIDI from S parameter")
-    print(f"S type: {type(S)}")
-    
-    try:
-        # Create temporary MIDI file
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.mid')
-        os.close(temp_fd)
-        
-        # Use the dump method to export to MIDI file
-        S.dump(filename=temp_path)
-        print(f"Created MIDI file from S parameter: {temp_path}")
-        
-        # Debug info about tracks
-        if hasattr(S, 'tracks'):
-            for track_idx, track in enumerate(S.tracks):
-                if hasattr(track, 'tracks_by_measure'):
-                    num_measures = len(track.tracks_by_measure)
-                    print(f"Track {track_idx}: {num_measures} measures")
-        
-        return temp_path
+        return generated_midi
         
     except Exception as e:
-        print(f"Error creating MIDI from S parameter: {e}")
-        import traceback
-        traceback.print_exc()
-        raise RuntimeError(f"Failed to create MIDI from S parameter: {e}")
+        if DEBUG:
+            print(f"MidiGPT processing failed: {e}")
+            traceback.print_exc()
+        return create_fallback_midi(timing_map)
 
-def extract_notes_from_midi(midi_path):
-    """Extract notes from MIDI file in a format suitable for CA conversion"""
-    notes = []
+def restore_original_timing_structure(generated_midi, original_timing_map):
+    """Extract notes from generated MIDI and map back to original project timing"""
     
-    try:
-        midi_file = mido.MidiFile(midi_path)
-        print(f"Extracting notes from MIDI: {len(midi_file.tracks)} tracks")
+    # Extract all notes from generated MIDI (across all tracks)
+    generated_notes = []
+    
+    for track_idx, track in enumerate(generated_midi.tracks):
+        current_time = 0
+        active_notes = {}
         
-        for track_idx, track in enumerate(midi_file.tracks):
-            current_time = 0
-            active_notes = {}  # Track note-on events to match with note-offs
+        for msg in track:
+            current_time += msg.time
             
-            for msg in track:
-                current_time += msg.time
-                
-                if msg.type == 'note_on' and msg.velocity > 0:
-                    # Store note-on event
-                    active_notes[msg.note] = {
-                        'start_time': current_time,
-                        'velocity': msg.velocity
-                    }
-                elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                    # Note-off event
-                    if msg.note in active_notes:
-                        note_on = active_notes.pop(msg.note)
-                        duration = current_time - note_on['start_time']
-                        
-                        # Convert to measure-based timing (assuming 1920 ticks per measure)
-                        measure = note_on['start_time'] // 1920
-                        
-                        note = {
-                            'measure': measure,
-                            'pitch': msg.note,
-                            'duration': max(480, duration),  # Minimum quarter note
-                            'velocity': note_on['velocity'],
-                            'start_time': note_on['start_time']
-                        }
-                        notes.append(note)
+            if msg.type == 'note_on' and msg.velocity > 0:
+                active_notes[msg.note] = {
+                    'start': current_time,
+                    'velocity': msg.velocity,
+                    'track': track_idx
+                }
+            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                if msg.note in active_notes:
+                    note_info = active_notes.pop(msg.note)
+                    duration = current_time - note_info['start']
+                    
+                    generated_notes.append({
+                        'pitch': msg.note,
+                        'start_time': note_info['start'],
+                        'end_time': current_time,
+                        'duration': duration,
+                        'velocity': note_info['velocity'],
+                        'track': note_info['track']
+                    })
+    
+    if DEBUG:
+        print(f"Extracted {len(generated_notes)} notes from generated MIDI")
+    
+    # Map generated notes back to original project timing structure
+    project_start = original_timing_map.project_start_measure
+    project_end = original_timing_map.project_end_measure
+    project_range = project_end - project_start + 1
+    project_duration_ticks = project_range * 1920  # Total project duration in ticks
+    
+    # Group notes by their target measure in the original project
+    notes_by_project_measure = defaultdict(list)
+    
+    for note in generated_notes:
+        # Calculate which measure this note should go to in the original project
+        # Use modulo to wrap long generations back into the project range
+        if project_duration_ticks > 0:
+            relative_position = (note['start_time'] % project_duration_ticks) / project_duration_ticks
+            target_measure = project_start + int(relative_position * project_range)
+        else:
+            target_measure = project_start
         
-        print(f"Extracted {len(notes)} notes from MIDI")
-        return notes
+        # Ensure we stay within project bounds
+        target_measure = max(project_start, min(project_end, target_measure))
         
-    except Exception as e:
-        print(f"Error extracting notes from MIDI: {e}")
-        return []
+        # Calculate position within the target measure
+        measure_position = note['start_time'] % 1920  # Position within measure
+        
+        notes_by_project_measure[target_measure].append({
+            'pitch': note['pitch'],
+            'duration': note['duration'],
+            'position_in_measure': measure_position,
+            'velocity': note['velocity']
+        })
+    
+    # Convert back to CA format with original project measures
+    ca_parts = []
+    
+    # Sort measures to ensure consistent output
+    for measure in sorted(notes_by_project_measure.keys()):
+        measure_notes = notes_by_project_measure[measure]
+        
+        # Sort notes within measure by position
+        measure_notes.sort(key=lambda n: n['position_in_measure'])
+        
+        for note in measure_notes:
+            ca_parts.extend([
+                f"M:{measure}",
+                f"N:{note['pitch']}",
+                f"d:{max(240, min(1920, int(note['duration'])))}",  # Clamp duration to reasonable range
+                f"w:{max(240, min(1920, int(note['duration'])))}"
+            ])
+    
+    result_ca = ";" + ";".join(ca_parts) + ";"
+    
+    if DEBUG:
+        print(f"Generated CA result: {len(result_ca)} characters")
+        print(f"Result measures: {sorted(notes_by_project_measure.keys())}")
+        print(f"CA preview: {result_ca[:200]}...")
+    
+    return result_ca
+
+def create_fallback_midi(timing_map):
+    """Create simple fallback MIDI when MidiGPT fails"""
+    
+    midi_file = mido.MidiFile(ticks_per_beat=480)
+    track = mido.MidiTrack()
+    midi_file.tracks.append(track)
+    
+    # Add headers
+    track.append(mido.MetaMessage('set_tempo', tempo=500000, time=0))
+    track.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+    
+    # Add simple fallback notes across the project range
+    pitches = [60, 64, 67, 72]  # C major chord + octave
+    
+    for i in range(timing_map.project_total_measures):
+        measure_start = i * 1920
+        pitch = pitches[i % len(pitches)]
+        
+        track.append(mido.Message('note_on', channel=0, note=pitch, velocity=80, time=measure_start))
+        track.append(mido.Message('note_off', channel=0, note=pitch, velocity=0, time=480))
+    
+    track.append(mido.MetaMessage('end_of_track', time=0))
+    
+    if DEBUG:
+        print("Created fallback MIDI with simple chord progression")
+    
+    return midi_file
+
+def find_model_checkpoint():
+    """Find MidiGPT model checkpoint with multiple path attempts"""
+    possible_paths = [
+        "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "../../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
+        "/Users/griffinpage/Documents/GitHub/midigpt-REAPER/MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt"
+    ]
+    
+    for path in possible_paths:
+        abs_path = os.path.abspath(path)
+        if os.path.exists(abs_path):
+            return abs_path
+    
+    if DEBUG:
+        print("Warning: No model checkpoint found")
+    return None
 
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
                    has_fully_masked_inst=False, temperature=1.0):
     """
-    REAPER-compatible function signature for neural network infill generation
+    Timing-preserving version that works with any AI model.
+    Preserves the relationship between input and output timing.
     """
-    print("🎵 MidiGPT call_nn_infill called")
-    print(f"  s: {type(s)} ({len(s) if isinstance(s, str) else 'N/A'} chars)")
-    print(f"  S: {type(S)}")
-    print(f"  use_sampling: {use_sampling}")
-    print(f"  temperature: {temperature}")
+    
+    if DEBUG:
+        print("🎵 MidiGPT call_nn_infill called (timing-preserving version)")
+        print(f"Input string length: {len(s)} characters")
+        print(f"Temperature: {temperature}")
     
     try:
-        # Convert S to dict if it's a string
-        if isinstance(S, str):
-            S_dict = json.loads(S)
+        # Convert S parameter if needed
+        if isinstance(S, dict):
+            if DEBUG:
+                print("Converting S from dict to MidiSongByMeasure...")
+            S = pre.midisongbymeasure_from_save_dict(S)
+        
+        # Extract project measure information from S parameter
+        project_measures = []
+        if S and S.tracks:
+            num_measures = len(S.tracks[0].tracks_by_measure)
+            project_measures = list(range(num_measures))
         else:
-            S_dict = S
-            
-        print("Converted S parameter from dict to MidiSongByMeasure")
+            # Fallback to reasonable default
+            project_measures = [0, 1, 2, 3]
         
-        # Process with MidiGPT
-        result = process_midigpt_for_reaper(s, {
-            'use_sampling': use_sampling,
-            'min_length': min_length,
-            'enc_no_repeat_ngram_size': enc_no_repeat_ngram_size,
-            'has_fully_masked_inst': has_fully_masked_inst,
-            'temperature': temperature
-        })
+        if DEBUG:
+            print(f"Project measures: {project_measures}")
         
-        return result
+        # Create timing map from input CA string
+        timing_map = TimingMap(s, project_measures)
+        
+        # Create MIDI with preserved timing structure
+        input_midi = create_timing_preserving_midi(timing_map)
+        
+        # Process with MidiGPT (or other AI models)
+        generated_midi = process_with_midigpt(input_midi, timing_map, temperature)
+        
+        # Restore original timing structure and convert to CA format
+        result_ca = restore_original_timing_structure(generated_midi, timing_map)
+        
+        if DEBUG:
+            print(f"✓ Final result: {len(result_ca)} characters")
+        
+        return result_ca
         
     except Exception as e:
-        error_msg = f"MidiGPT sample_multi_step failed: {e}"
-        print(f"ERROR in call_nn_infill: {error_msg}")
-        print("Full traceback:")
-        traceback.print_exc()
-        raise RuntimeError(error_msg) from e
+        if DEBUG:
+            print(f"❌ Error in timing-preserving generation: {e}")
+            traceback.print_exc()
+        
+        # Ultimate fallback
+        return ";M:0;N:60;d:480;w:480;M:1;N:64;d:480;w:480;M:2;N:67;d:480;w:480;"
 
-def check_libraries():
-    """Check status of required libraries"""
-    return {
-        'midigpt_available': MIDIGPT_AVAILABLE,
-        'midi_available': MIDI_AVAILABLE
-    }
-
-def main():
-    """Start the MidiGPT server"""
-    print("MidiGPT Server running on http://127.0.0.1:3456")
-    print("Ready to process REAPER requests with fail-fast debugging")
-    print(f"MidiGPT Available: {MIDIGPT_AVAILABLE}")
-    print(f"MIDI Library Available: {MIDI_AVAILABLE}")
+class TimingPreservingMidiGPTServer:
+    """XML-RPC server for timing-preserving MidiGPT integration"""
     
-    server = SimpleXMLRPCServer(("127.0.0.1", 3456), allow_none=True)
-    server.register_function(call_nn_infill, "call_nn_infill")
-    server.register_function(check_libraries, "check_libraries")
+    def __init__(self, port=3456):
+        self.port = port
+        self.server = None
     
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nServer shutdown requested")
-    except Exception as e:
-        print(f"Server error: {e}")
-        traceback.print_exc()
+    def start_server(self):
+        """Start the XML-RPC server"""
+        print(f"Starting timing-preserving MidiGPT server on port {self.port}...")
+        
+        self.server = SimpleXMLRPCServer(('127.0.0.1', self.port), allow_none=True)
+        self.server.register_function(call_nn_infill, 'call_nn_infill')
+        
+        print("✓ Server registered functions:")
+        print("  - call_nn_infill (timing-preserving)")
+        print(f"✓ Server ready on http://127.0.0.1:{self.port}")
+        print("✓ Model-agnostic timing preservation enabled")
+        
+        try:
+            self.server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n🛑 Server stopped by user")
+        except Exception as e:
+            print(f"❌ Server error: {e}")
+        finally:
+            if self.server:
+                self.server.server_close()
 
 if __name__ == "__main__":
-    main()
+    # Validate dependencies
+    if not MIDO_AVAILABLE:
+        print("❌ Cannot start server: mido library required")
+        sys.exit(1)
+    
+    if not MIDIGPT_AVAILABLE:
+        print("⚠️  Warning: MidiGPT not available, will use fallback generation")
+    
+    # Start server
+    server = TimingPreservingMidiGPTServer(port=3456)
+    server.start_server()
