@@ -53,3 +53,33 @@ def call_midigpt_via_proxy(nn_input, options):
     # This should not be called in the unified architecture
     # The REAPER script should use rpr_ca_functions.call_nn_infill directly
     return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240"
+
+def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, has_fully_masked_inst=False,
+                   temperature=1.0, start_measure=None, end_measure=None):
+    """
+    Call the MidiGPT server via XML-RPC
+    Includes start_measure and end_measure for proper selection bounds
+    """
+    from xmlrpc.client import ServerProxy
+    import xmlrpc.client
+    import preprocessing_functions as pre
+    import message_tools as mt
+    
+    try:
+        proxy = ServerProxy('http://127.0.0.1:3456')
+        # Pass all parameters including the new selection bounds
+        res = proxy.call_nn_infill(s, pre.encode_midisongbymeasure_to_save_dict(S), use_sampling, min_length, 
+                                   enc_no_repeat_ngram_size, has_fully_masked_inst, temperature,
+                                   start_measure, end_measure)
+    except Exception as exception:
+        if type(exception) == xmlrpc.client.Fault:
+            print('Exception raised by NN:')
+        else:
+            errormsg = 'NN server not found. '
+            errormsg += 'Make sure you have started the MidiGPT server manually.'
+            mt.messagebox(msg=errormsg,
+                          title='REAPER: MidiGPT server error',
+                          int_type=0)
+        raise exception
+
+    return res

@@ -30,15 +30,13 @@ patch_stdout_stderr_open()
 
 
 def go():
-    # Read from midigpt effects but return CAv2-compatible format
     options = midigpt_fn.get_global_options()
     
     if fn.DEBUG or options.display_track_to_MIDI_inst:
         RPR_ClearConsole()
 
-    print("Using infill script (works with empty MIDI items)")
+    print("Using MidiGPT infill script")
 
-    # This is the same as your original infill scripts - should work with empty items
     nn_input = fn.get_nn_input_from_project(mask_empty_midi_items=True, mask_selected_midi_items=True,
                                             do_rhythmic_conditioning=options.do_rhythm_conditioning,
                                             rhythmic_conditioning_type=options.rhythm_conditioning_type,
@@ -49,17 +47,22 @@ def go():
     
     if nn_input.continue_:
         if fn.DEBUG:
+            print('Selection: measures {} to {}'.format(nn_input.start_measure, nn_input.end_measure))
             print('calling NN with input:')
             print(nn_input.nn_input_string)
         
         use_sampling = "None" if not fn.ALWAYS_TOP_P else True
-        nn_output = fn.call_nn_infill(s=nn_input.nn_input_string,
-                                      S=nn_input.S,
-                                      use_sampling=use_sampling,
-                                      min_length=2,
-                                      enc_no_repeat_ngram_size=options.enc_no_repeat_ngram_size,
-                                      has_fully_masked_inst=nn_input.has_fully_masked_inst,
-                                      temperature=options.temperature)
+        
+        # Use MidiGPT-specific wrapper function
+        nn_output = midigpt_fn.call_nn_infill(s=nn_input.nn_input_string,
+                                              S=nn_input.S,
+                                              use_sampling=use_sampling,
+                                              min_length=2,
+                                              enc_no_repeat_ngram_size=options.enc_no_repeat_ngram_size,
+                                              has_fully_masked_inst=nn_input.has_fully_masked_inst,
+                                              temperature=options.temperature,
+                                              start_measure=nn_input.start_measure,
+                                              end_measure=nn_input.end_measure)
         
         if fn.DEBUG:
             print('got nn output: ', nn_output)
