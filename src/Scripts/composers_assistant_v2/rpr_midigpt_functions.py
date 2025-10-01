@@ -1,4 +1,6 @@
 # rpr_midigpt_functions.py - Fixed version with missing get_global_options
+import preprocessing_functions as pre
+
 
 def test_function():
     return "midigpt functions loaded"
@@ -63,23 +65,18 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     from xmlrpc.client import ServerProxy
     import xmlrpc.client
     import preprocessing_functions as pre
-    import message_tools as mt
     
     try:
         proxy = ServerProxy('http://127.0.0.1:3456')
-        # Pass all parameters including the new selection bounds
         res = proxy.call_nn_infill(s, pre.encode_midisongbymeasure_to_save_dict(S), use_sampling, min_length, 
                                    enc_no_repeat_ngram_size, has_fully_masked_inst, temperature,
                                    start_measure, end_measure)
-    except Exception as exception:
-        if type(exception) == xmlrpc.client.Fault:
-            print('Exception raised by NN:')
-        else:
-            errormsg = 'NN server not found. '
-            errormsg += 'Make sure you have started the MidiGPT server manually.'
-            mt.messagebox(msg=errormsg,
-                          title='REAPER: MidiGPT server error',
-                          int_type=0)
-        raise exception
-
-    return res
+        return res
+    except xmlrpc.client.Fault as e:
+        print('Exception raised by MidiGPT server:')
+        print(str(e))
+        raise
+    except Exception as e:
+        print('MidiGPT server connection failed. Make sure midigpt_server.py is running on port 3456.')
+        print(f'Error: {e}')
+        raise
