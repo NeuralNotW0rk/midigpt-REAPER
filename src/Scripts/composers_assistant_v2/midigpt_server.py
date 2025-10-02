@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-MidiGPT Server with correct 9-parameter signature
-Matches rpr_midigpt_functions.py exactly
+MidiGPT Server - Patched to fix measures_to_generate parameter passing
+Critical fix: Pass measures_to_generate to convert_midi_to_ca_format_with_timing
 """
 
 import os
@@ -9,6 +9,7 @@ import sys
 from xmlrpc.server import SimpleXMLRPCServer
 import tempfile
 import json
+import re
 
 # Add MIDI-GPT python_lib to path
 midi_gpt_path = os.path.join(os.path.dirname(__file__), "../../../MIDI-GPT/python_lib")
@@ -31,7 +32,6 @@ PORT = 3456
 
 # Find checkpoint dynamically
 def find_checkpoint():
-    """Find MidiGPT checkpoint file"""
     possible_paths = [
         "MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
         "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
@@ -40,8 +40,8 @@ def find_checkpoint():
     for path in possible_paths:
         if os.path.exists(path):
             return os.path.abspath(path)
-    print("WARNING: No checkpoint found, generation may fail")
-    return possible_paths[0]  # Return default, will fail but with clear error
+    print("WARNING: No checkpoint found")
+    return possible_paths[0]
 
 CHECKPOINT_PATH = find_checkpoint()
 print(f"Using checkpoint: {CHECKPOINT_PATH}")
@@ -49,78 +49,6 @@ print(f"Using checkpoint: {CHECKPOINT_PATH}")
 # Caching
 LAST_CALL = None
 LAST_OUTPUTS = set()
-
-
-def convert_midi_to_ca_format(midi_path):
-    """Convert a MIDI file back to CA format string (simple version without timing preservation)"""
-    if DEBUG:
-        print(f"  Converting MIDI to CA format: {midi_path}")
-    
-    midi_file = mido.MidiFile(midi_path)
-    
-    # Extract notes from all tracks
-    all_notes = []
-    ticks_per_beat = midi_file.ticks_per_beat
-    
-    for track_idx, track in enumerate(midi_file.tracks):
-        current_time = 0
-        active_notes = {}
-        
-        for msg in track:
-            current_time += msg.time
-            
-            if msg.type == 'note_on' and msg.velocity > 0:
-                active_notes[msg.note] = {
-                    'start': current_time,
-                    'velocity': msg.velocity
-                }
-            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                if msg.note in active_notes:
-                    note_info = active_notes.pop(msg.note)
-                    duration = current_time - note_info['start']
-                    all_notes.append({
-                        'pitch': msg.note,
-                        'start': note_info['start'],
-                        'duration': duration,
-                        'velocity': note_info['velocity']
-                    })
-    
-    if not all_notes:
-        if DEBUG:
-            print("  WARNING: No notes found in MIDI file")
-        return "<extra_id_0>N:60;d:240;w:240"
-    
-    # Sort by start time
-    all_notes.sort(key=lambda n: n['start'])
-    
-    # Convert to CA format
-    ca_parts = []
-    last_time = 0
-    measure_length = ticks_per_beat * 4
-    current_measure = 0
-    
-    for note in all_notes:
-        note_measure = note['start'] // measure_length
-        
-        if note_measure != current_measure:
-            current_measure = note_measure
-            ca_parts.append(f"M:{current_measure}")
-        
-        wait = note['start'] - last_time
-        
-        if wait > 0:
-            ca_parts.append(f"w:{int(wait)}")
-        ca_parts.append(f"N:{note['pitch']}")
-        ca_parts.append(f"d:{int(note['duration'])}")
-        
-        last_time = note['start']
-    
-    result = ';'.join([''] + ca_parts)
-    
-    if DEBUG:
-        print(f"  Converted {len(all_notes)} notes to CA format: {len(result)} chars")
-    
-    return result
 
 
 def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0, measures_to_generate=None):
@@ -214,19 +142,26 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     # Build CA format string with extra_id grouping
     ca_parts = []
     
-    # Use the actual extra_id from the input (e.g., 191) so REAPER can match it
+    # Use the actual extra_id from the input so REAPER can match it
     if notes_by_measure:
         ca_parts.append(f"<extra_id_{actual_extra_id}>")
         
-        # Combine all generated measures' notes into one instruction list
-        all_measure_notes = []
+        # CRITICAL: We need to track timing relative to the FIRST note in the generated content
+        # REAPER expects times relative to the extra_id marker, not absolute MIDI times
+        all_generated_notes = []
         for measure in sorted(notes_by_measure.keys()):
-            all_measure_notes.extend(sorted(notes_by_measure[measure], key=lambda n: n['start']))
+            all_generated_notes.extend(notes_by_measure[measure])
         
-        if all_measure_notes:
-            last_time = 0
+        # Sort by start time
+        all_generated_notes.sort(key=lambda n: n['start'])
+        
+        if all_generated_notes:
+            # Start timing from the first generated note
+            first_note_start = all_generated_notes[0]['start']
+            last_time = first_note_start
             
-            for note in all_measure_notes:
+            for note in all_generated_notes:
+                # Calculate wait from last event
                 wait = note['start'] - last_time
                 
                 if wait > 0:
@@ -255,6 +190,10 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     """
     global LAST_CALL, LAST_OUTPUTS
     
+    # Check for extra_id tokens and extract actual_extra_id early
+    extra_ids = re.findall(r'<extra_id_(\d+)>', s)
+    actual_extra_id = int(extra_ids[0]) if extra_ids else 0
+    
     if DEBUG:
         print(f"\nMidiGPT call_nn_infill called")
         print(f"  Input length: {len(s)} chars")
@@ -264,22 +203,14 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         print(f"  {s}")
         print()
         
-        # Check for extra_id tokens
-        import re
-        extra_ids = re.findall(r'<extra_id_(\d+)>', s)
         if extra_ids:
             print(f"  Found extra IDs: {extra_ids}")
-        
-        # Store the actual extra_id number for use in the response
-        actual_extra_id = int(extra_ids[0]) if extra_ids else 0
     
     if not MIDIGPT_AVAILABLE:
         print("MidiGPT not available, returning fallback")
-        return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240"
+        return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
     
-    # TIMING PRESERVATION: Use explicit measure range from REAPER
-    # The start_measure and end_measure parameters define the selection to be modified
-    # The s parameter may include additional context measures
+    # TIMING PRESERVATION: Determine project measure range
     if start_measure is not None and end_measure is not None:
         project_measures = list(range(start_measure, end_measure + 1))
     else:
@@ -326,14 +257,18 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     if DEBUG:
         print(f"  Empty measures in selection: {actual_empty_measures}")
     
-    # Use actual empty measures instead of parsing the s string
+    # CRITICAL: Store which measures need generation
+    measures_to_generate = set()
     if actual_empty_measures:
         measures_to_generate = set(actual_empty_measures)
         if DEBUG:
             print(f"  Will generate for empty measures: {sorted(measures_to_generate)}")
+    else:
+        # Fallback: use all project measures if detection failed
+        measures_to_generate = set(project_measures)
     
     try:
-        # Convert S dictionary back to MidiSongByMeasure object
+        # Convert S dictionary to MidiSongByMeasure object
         midi_song = pre.midisongbymeasure_from_save_dict(S)
         
         if DEBUG:
@@ -343,7 +278,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
         
-        # Export to MIDI file using correct method
+        # Export to MIDI file
         midi_song.dump(filename=temp_midi_path)
         
         if DEBUG:
@@ -352,7 +287,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         # Load with MidiGPT - use ExpressiveEncoder
         encoder = midigpt.ExpressiveEncoder()
         
-        # Convert MIDI to JSON using correct API
+        # Convert MIDI to JSON
         protobuf_json = encoder.midi_to_json(temp_midi_path)
         midi_json_input = json.loads(protobuf_json)
         
@@ -360,31 +295,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             print(f"  Converted to MidiGPT JSON: {len(protobuf_json)} chars")
         
         # Determine if this is infill or continuation
-        import re
         has_extra_ids = '<extra_id_' in s
-        
-        # Use actual empty measures from S parameter analysis
-        if not actual_empty_measures:
-            # Fallback: parse from string if S parameter analysis failed
-            segments = s.split(';')
-            current_measure = None
-            
-            if DEBUG:
-                print(f"  Fallback: Parsing segments to find extra_id locations:")
-            
-            for i, segment in enumerate(segments):
-                if segment.startswith('M:'):
-                    try:
-                        current_measure = int(segment[2:])
-                        if DEBUG and i < 20:
-                            print(f"    Segment {i}: Set current_measure to {current_measure}")
-                    except ValueError:
-                        pass
-                elif '<extra_id_' in segment:
-                    if current_measure is not None and current_measure in project_measures:
-                        measures_to_generate.add(current_measure)
-                        if DEBUG:
-                            print(f"    Segment {i}: Found extra_id in measure {current_measure}")
         
         if DEBUG:
             print(f"  Has extra_ids: {has_extra_ids}")
@@ -396,126 +307,116 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             "tracks": []
         }
         
-        # For each track in the piece, configure generation
-        num_tracks = len(midi_json_input.get('tracks', []))
+        # Configure selected bars for generation
+        num_measures = len(project_measures)
+        selected_bars = [measure_idx in measures_to_generate for measure_idx in project_measures]
         
-        # Determine selected_bars based on which measures need generation
-        # selected_bars should match the number of bars in the MIDI (typically 4)
-        num_bars = 4
-        if has_extra_ids and measures_to_generate:
-            # Only select bars that need generation
-            # Map project measures to MIDI bar indices
-            selected_bars = []
-            for bar_idx in range(num_bars):
-                # Check if this bar index corresponds to a measure that needs generation
-                if bar_idx < len(project_measures):
-                    project_measure = project_measures[bar_idx]
-                    selected_bars.append(project_measure in measures_to_generate)
-                else:
-                    selected_bars.append(False)
-        else:
-            # No infill - generate for all bars
-            selected_bars = [True] * num_bars
+        for track_idx in range(len(midi_song.tracks)):
+            track_config = {
+                "track_id": track_idx,
+                "track_type": "STANDARD_TRACK",
+                "selected_bars": selected_bars,
+                "ignore": False,
+                "temperature": temperature,
+                "polyphony_hard_limit": 10
+            }
+            # Only add autoregressive if needed for infill with all bars selected
+            if has_extra_ids and all(selected_bars):
+                track_config["autoregressive"] = True
+            status["tracks"].append(track_config)
         
         if DEBUG:
             print(f"  Selected bars: {selected_bars}")
+            print(f"  Shuffle: {not has_extra_ids}")
         
-        for track_idx in range(max(1, num_tracks)):
-            track_config = {
-                "track_id": track_idx,
-                "temperature": temperature,
-                "instrument": "acoustic_grand_piano",
-                "density": 10,
-                "track_type": 10,
-                "ignore": False,
-                "selected_bars": selected_bars,
-                "min_polyphony_q": "POLYPHONY_ANY",
-                "max_polyphony_q": "POLYPHONY_ANY",
-                "autoregressive": all(selected_bars),  # CRITICAL: Only True if ALL bars selected
-                "polyphony_hard_limit": 9
-            }
-            status["tracks"].append(track_config)
-        
-        # Parameter configuration (matching pythoninferencetest.py)
-        # CRITICAL: shuffle must be False when not all bars are selected
-        use_shuffle = all(selected_bars) if has_extra_ids else True
-        
-        param = {
-            "tracks_per_step": 1,
-            "bars_per_step": 1,
-            "model_dim": 4,
-            "percentage": 100,
-            "batch_size": 1,
-            "temperature": temperature,
-            "max_steps": 200,
-            "polyphony_hard_limit": 6,
-            "shuffle": use_shuffle,
-            "verbose": False,
-            "ckpt": CHECKPOINT_PATH,
-            "sampling_seed": -1,
-            "mask_top_k": 0
+        # Build generation parameters - ONLY valid HyperParam fields
+        # Both HyperParam and StatusTrack have temperature fields
+        params = {
+            'tracks_per_step': 1,
+            'bars_per_step': 1,
+            'model_dim': 4,
+            'percentage': 100,
+            'batch_size': 1,
+            'temperature': temperature,  # HyperParam also has temperature field
+            'max_steps': 200,
+            'shuffle': not has_extra_ids,
+            'verbose': DEBUG,
+            'ckpt': CHECKPOINT_PATH
         }
         
-        if DEBUG:
-            print(f"  Shuffle: {use_shuffle}")
+        # Convert to JSON strings
+        piece_str = json.dumps(midi_json_input)
+        status_str = json.dumps(status)
+        params_str = json.dumps(params)
         
-        # Call MidiGPT generation (exact pattern from pythoninferencetest.py)
         if DEBUG:
+            print(f"  Status JSON: {status_str[:500]}")
+            print(f"  Params JSON: {params_str}")
             print(f"  Calling MidiGPT generation...")
         
-        piece = json.dumps(midi_json_input)
-        status_str = json.dumps(status)
-        param_str = json.dumps(param)
+        # Create callback manager
         callbacks = midigpt.CallbackManager()
-        max_attempts = 3
         
-        midi_str = midigpt.sample_multi_step(piece, status_str, param_str, max_attempts, callbacks)
+        # Call MidiGPT generation
+        max_attempts = 1
+        midi_results = midigpt.sample_multi_step(piece_str, status_str, params_str, max_attempts, callbacks)
         
-        if not midi_str or len(midi_str) == 0:
-            raise Exception("MidiGPT returned no results")
+        if not midi_results or len(midi_results) == 0:
+            if DEBUG:
+                print("  MidiGPT returned empty result")
+            return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
         
-        # Parse result (first element is the result string)
-        result_json_str = midi_str[0]
+        # Parse first result
+        midi_result_str = midi_results[0]
+        result_json = json.loads(midi_result_str)
         
         if DEBUG:
-            print(f"  Generated: {len(result_json_str)} chars")
+            print(f"  Generated: {len(midi_result_str)} chars")
         
         # Convert result back to MIDI file
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
         
-        encoder.json_to_midi(result_json_str, result_midi_path)
+        # Use encoder.json_to_midi to convert back
+        encoder.json_to_midi(midi_result_str, result_midi_path)
         
         if DEBUG:
             print(f"  Saved result MIDI: {result_midi_path}")
         
-        # TIMING PRESERVATION: Convert MIDI back to CA format with proper measure mapping
-        result_str = convert_midi_to_ca_format_with_timing(result_midi_path, project_measures)
+        # CRITICAL FIX: Pass measures_to_generate parameter
+        ca_result = convert_midi_to_ca_format_with_timing(
+            result_midi_path,
+            project_measures,
+            actual_extra_id=actual_extra_id,
+            measures_to_generate=measures_to_generate  # ADDED THIS PARAMETER
+        )
         
-        if DEBUG:
-            print(f"  Result CA format: {len(result_str)} chars")
-        
-        # Cleanup temp files
+        # Clean up temp files
         try:
             os.unlink(temp_midi_path)
             os.unlink(result_midi_path)
         except:
             pass
         
-        return result_str
+        # Update cache
+        LAST_CALL = s
+        LAST_OUTPUTS.add(ca_result)
+        
+        if DEBUG:
+            print(f"  Result CA format: {len(ca_result)} chars")
+        
+        return ca_result
         
     except Exception as e:
         if DEBUG:
-            print(f"  Error: {e}")
+            print(f'Error in MidiGPT processing: {e}')
             import traceback
             traceback.print_exc()
         
-        # Return fallback
-        return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240"
+        return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
 
 
 def start_server():
-    """Start the XML-RPC server"""
     print("="*60)
     print("MidiGPT Server Starting")
     print("="*60)
@@ -523,22 +424,19 @@ def start_server():
     print(f"MidiGPT Available: {MIDIGPT_AVAILABLE}")
     print(f"Debug Mode: {DEBUG}")
     print("="*60)
+    print()
+    
+    server = SimpleXMLRPCServer(('127.0.0.1', PORT), logRequests=DEBUG, allow_none=True)
+    server.register_function(call_nn_infill, 'call_nn_infill')
+    
+    print(f"Server ready and listening on port {PORT}")
+    print("Press Ctrl+C to stop")
+    print()
     
     try:
-        server = SimpleXMLRPCServer(('127.0.0.1', PORT), logRequests=DEBUG)
-        server.register_function(call_nn_infill, 'call_nn_infill')
-        
-        print(f"\nServer ready and listening on port {PORT}")
-        print("Press Ctrl+C to stop\n")
-        
         server.serve_forever()
-        
     except KeyboardInterrupt:
-        print("\nServer stopped by user")
-    except Exception as e:
-        print(f"Server error: {e}")
-        import traceback
-        traceback.print_exc()
+        print("\nServer stopped")
 
 
 if __name__ == "__main__":
