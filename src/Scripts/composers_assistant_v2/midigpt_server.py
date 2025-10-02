@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-MidiGPT Server - Patched with proper timing conversion
-ONLY CHANGE: Fixed convert_midi_to_ca_format_with_timing to read actual MIDI timing
-instead of assuming ticks_per_beat=480 and time_signature=4/4
+MidiGPT Server - Complete with streamlined parameter support
+- Reads parameters from REAPER FX (Global and Track Options)
+- Applies them to MidiGPT generation
+- Includes timing conversion fixes
 """
 
 import os
@@ -17,6 +18,11 @@ midi_gpt_path = os.path.join(os.path.dirname(__file__), "../../../MIDI-GPT/pytho
 if os.path.exists(midi_gpt_path):
     sys.path.insert(0, os.path.abspath(midi_gpt_path))
 
+# Add composers_assistant path for preprocessing
+ca_path = os.path.join(os.path.dirname(__file__), "src/Scripts/composers_assistant_v2")
+if os.path.exists(ca_path):
+    sys.path.insert(0, os.path.abspath(ca_path))
+
 try:
     import midigpt
     import preprocessing_functions as pre
@@ -26,6 +32,15 @@ try:
 except ImportError as e:
     MIDIGPT_AVAILABLE = False
     print(f"MidiGPT not available: {e}")
+
+# Try to import midigpt functions for parameter reading
+try:
+    import rpr_midigpt_functions as midigpt_fn
+    PARAM_FUNCTIONS_AVAILABLE = True
+    print("Parameter reading functions loaded")
+except ImportError as e:
+    PARAM_FUNCTIONS_AVAILABLE = False
+    print(f"Parameter functions not available (will use defaults): {e}")
 
 # Configuration
 DEBUG = True
@@ -52,16 +67,64 @@ LAST_CALL = None
 LAST_OUTPUTS = set()
 
 
+def apply_track_options_to_status(status_json, track_options_by_idx, global_options):
+    """
+    Apply track-specific options from REAPER FX to MidiGPT status configuration.
+    
+    Args:
+        status_json: The status dict with tracks list
+        track_options_by_idx: Dict mapping track index to MidigptTrackOptionsObj
+        global_options: MidigptGlobalOptionsObj with global settings
+    """
+    
+    for track_idx, track_config in enumerate(status_json.get('tracks', [])):
+        # Check if this track has specific options
+        if track_idx in track_options_by_idx:
+            options = track_options_by_idx[track_idx]
+            
+            # Apply temperature (use track-specific if set, otherwise global)
+            if options.track_temperature >= 0:
+                track_config['temperature'] = options.track_temperature
+            else:
+                track_config['temperature'] = global_options.temperature
+            
+            # Apply instrument
+            track_config['instrument'] = options.instrument
+            
+            # Apply density
+            track_config['density'] = options.density
+            
+            # Apply track type
+            track_config['track_type'] = options.track_type
+            
+            # Apply polyphony constraints
+            track_config['min_polyphony_q'] = options.min_polyphony_q
+            track_config['max_polyphony_q'] = options.max_polyphony_q
+            
+            # Apply polyphony hard limit (use track-specific if set, otherwise global)
+            if options.polyphony_hard_limit > 0:
+                track_config['polyphony_hard_limit'] = options.polyphony_hard_limit
+            else:
+                track_config['polyphony_hard_limit'] = global_options.polyphony_hard_limit
+        else:
+            # Use global defaults for tracks without specific options
+            track_config['temperature'] = global_options.temperature
+            track_config['instrument'] = 'acoustic_grand_piano'
+            track_config['density'] = 10
+            track_config['track_type'] = 'STANDARD_TRACK'
+            track_config['min_polyphony_q'] = 'POLYPHONY_ANY'
+            track_config['max_polyphony_q'] = 'POLYPHONY_ANY'
+            track_config['polyphony_hard_limit'] = global_options.polyphony_hard_limit
+
+
 def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0, 
                                           measures_to_generate=None, input_ticks_per_beat=None, 
                                           input_time_signature=None):
     """
     TIMING PRESERVATION: Convert MIDI back to CA format with extra_id grouping
     
-    PATCHED: Now reads actual ticks_per_beat and time_signature from MIDI file
-    instead of hardcoding ticks_per_beat=480 and assuming 4/4 time.
-    
-    ENHANCED: Can optionally use input_ticks_per_beat and input_time_signature
+    Reads actual ticks_per_beat and time_signature from MIDI file
+    Can optionally use input_ticks_per_beat and input_time_signature
     if the output MIDI timing differs from input (e.g., MidiGPT changes resolution)
     
     Returns format like: ;<extra_id_191>N:60;d:480;w:240;N:64;d:480
@@ -169,10 +232,6 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
         print(f"  Extracted {len(all_notes)} total notes")
         ai_measures = sorted(set(n['ai_measure'] for n in all_notes))
         print(f"  AI measures: {ai_measures}")
-        # Debug: Show first few notes with their timings
-        print(f"  First 5 notes:")
-        for i, note in enumerate(sorted(all_notes, key=lambda n: n['start'])[:5]):
-            print(f"    Note {i}: pitch={note['pitch']}, start={note['start']}, duration={note['duration']}, measure={note['ai_measure']}")
     
     # MAP AI MEASURES TO PROJECT MEASURES
     ai_measures_sorted = sorted(set(n['ai_measure'] for n in all_notes))
@@ -204,10 +263,7 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
         return f";<extra_id_{actual_extra_id}>"
     
     if DEBUG:
-        print(f"  Notes in generated measures only: {sum(len(notes) for notes in notes_by_measure.values())} notes")
-        # Debug: Show distribution across measures
-        for measure in sorted(notes_by_measure.keys()):
-            print(f"    Measure {measure}: {len(notes_by_measure[measure])} notes")
+        print(f"  Notes in generated measures: {sum(len(notes) for notes in notes_by_measure.values())} notes")
     
     # TIMING RESET: Get all notes from generated measures and reset timing to first note
     all_generated_notes = []
@@ -225,7 +281,6 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     
     if DEBUG:
         print(f"  Building CA format from {len(all_generated_notes)} notes")
-        print(f"  First note starts at tick: {first_note_start}")
     
     for note in all_generated_notes:
         wait = note['start'] - last_time
@@ -241,12 +296,8 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     
     if DEBUG:
         print(f"  Final CA: {len(result)} chars")
-        print(f"  Preview: {result[:150]}...")
-        # Show structure breakdown
         note_count = result.count('N:')
-        wait_count = result.count('w:')
-        duration_count = result.count('d:')
-        print(f"  Structure: {note_count} notes, {wait_count} waits, {duration_count} durations")
+        print(f"  Structure: {note_count} notes")
     
     return result
 
@@ -255,15 +306,25 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                    has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
     """
     Main function called by REAPER via XMLRPC
-    Signature matches rpr_midigpt_functions.py (9 parameters)
+    Now with parameter support from REAPER FX
     """
     global LAST_CALL, LAST_OUTPUTS
+    
+    # Validate temperature - MidiGPT requires [0.5, 2.0]
+    if temperature < 0.5:
+        if DEBUG:
+            print(f"Warning: Temperature {temperature} below minimum 0.5, clamping to 0.5")
+        temperature = 0.5
+    elif temperature > 2.0:
+        if DEBUG:
+            print(f"Warning: Temperature {temperature} above maximum 2.0, clamping to 2.0")
+        temperature = 2.0
     
     if DEBUG:
         print(f"\n{'='*60}")
         print('MIDIGPT CALL_NN_INFILL RECEIVED')
         print(f"Input length: {len(s)} chars")
-        print(f"Temperature: {temperature}")
+        print(f"Temperature (validated): {temperature}")
         if start_measure is not None and end_measure is not None:
             print(f"Selection bounds: measures {start_measure}-{end_measure}")
     
@@ -272,6 +333,74 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             if DEBUG:
                 print("MidiGPT not available - returning fallback")
             return "<extra_id_0>N:60;d:240;w:240"
+        
+        # Read parameters from REAPER FX (if available)
+        if PARAM_FUNCTIONS_AVAILABLE:
+            try:
+                global_options = midigpt_fn.get_midigpt_global_options()
+                track_options = midigpt_fn.get_midigpt_track_options_by_track_idx()
+                
+                if DEBUG:
+                    print(f"\nGlobal Options:")
+                    print(f"  Temperature: {global_options.temperature}")
+                    print(f"  Model Dim: {global_options.model_dim}")
+                    print(f"  Max Steps: {global_options.max_steps}")
+                    print(f"  Shuffle: {global_options.shuffle}")
+                    print(f"  Polyphony Hard Limit: {global_options.polyphony_hard_limit}")
+                    
+                    if track_options:
+                        print(f"\nTrack Options ({len(track_options)} tracks):")
+                        for idx, opts in track_options.items():
+                            print(f"  Track {idx}:")
+                            print(f"    Instrument: {opts.instrument}")
+                            print(f"    Density: {opts.density}")
+                            print(f"    Track Type: {opts.track_type}")
+                            print(f"    Min Polyphony: {opts.min_polyphony_q}")
+                            print(f"    Max Polyphony: {opts.max_polyphony_q}")
+            except Exception as e:
+                if DEBUG:
+                    print(f"Could not read parameters from REAPER: {e}")
+                # Create defaults - capture temperature first to avoid scoping issue
+                temp_val = temperature
+                
+                class DefaultGlobalOptions:
+                    pass
+                
+                global_options = DefaultGlobalOptions()
+                global_options.temperature = temp_val
+                global_options.tracks_per_step = 1
+                global_options.bars_per_step = 1
+                global_options.model_dim = 4
+                global_options.percentage = 100
+                global_options.max_steps = 200
+                global_options.batch_size = 1
+                global_options.shuffle = True
+                global_options.sampling_seed = -1
+                global_options.mask_top_k = 0
+                global_options.polyphony_hard_limit = 6
+                
+                track_options = {}
+        else:
+            # Create defaults if parameter functions not available
+            temp_val = temperature
+            
+            class DefaultGlobalOptions:
+                pass
+            
+            global_options = DefaultGlobalOptions()
+            global_options.temperature = temp_val
+            global_options.tracks_per_step = 1
+            global_options.bars_per_step = 1
+            global_options.model_dim = 4
+            global_options.percentage = 100
+            global_options.max_steps = 200
+            global_options.batch_size = 1
+            global_options.shuffle = True
+            global_options.sampling_seed = -1
+            global_options.mask_top_k = 0
+            global_options.polyphony_hard_limit = 6
+            
+            track_options = {}
         
         # Normalize request for caching
         s_normalized = re.sub(r'<extra_id_\d+>', '<extra_id_0>', s)
@@ -296,6 +425,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             project_measures = list(range(S.get_n_measures()))
         
         if DEBUG:
+            print(f"\nData Processing:")
             print(f"  Found extra_ids: {extra_ids}")
             print(f"  Project measures: {project_measures}")
         
@@ -312,10 +442,9 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
         
-        # Convert S to MIDI using dump method
         S.dump(filename=temp_midi_path)
         
-        # CRITICAL: Capture the input MIDI timing parameters for later conversion
+        # Capture input MIDI timing
         input_midi = mido.MidiFile(temp_midi_path)
         input_ticks_per_beat = input_midi.ticks_per_beat
         input_time_sig_num = 4
@@ -330,8 +459,9 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                 break
         
         if DEBUG:
-            print(f"  Created input MIDI: {temp_midi_path}")
-            print(f"  Input MIDI timing: {input_ticks_per_beat} ticks/beat, {input_time_sig_num}/{input_time_sig_denom} time sig")
+            print(f"\nMIDI Conversion:")
+            print(f"  Input MIDI: {temp_midi_path}")
+            print(f"  Timing: {input_ticks_per_beat} ticks/beat, {input_time_sig_num}/{input_time_sig_denom}")
         
         # Load encoder
         encoder = midigpt.ExpressiveEncoder()
@@ -340,41 +470,56 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         piece_json_str = encoder.midi_to_json(temp_midi_path)
         piece_json = json.loads(piece_json_str)
         
-        # Setup generation parameters (from pythoninferencetest.py)
-        status = {
-            'tracks': [{
-                'track_id': 0,
-                'temperature': temperature,
+        # Determine number of tracks for status configuration
+        num_tracks = len(piece_json.get('tracks', []))
+        if num_tracks == 0:
+            num_tracks = 1
+        
+        # Build status configuration with defaults
+        status = {'tracks': []}
+        
+        for track_idx in range(num_tracks):
+            track_config = {
+                'track_id': track_idx,
+                'temperature': global_options.temperature,
                 'instrument': 'acoustic_grand_piano',
                 'density': 10,
-                'track_type': 10,
+                'track_type': 'STANDARD_TRACK',
                 'ignore': False,
                 'selected_bars': [True if i in measures_to_generate else False for i in project_measures],
                 'min_polyphony_q': 'POLYPHONY_ANY',
                 'max_polyphony_q': 'POLYPHONY_ANY',
-                'autoregressive': False,  # MUST be False for selective bars (infill mode)
-                'polyphony_hard_limit': 9
-            }]
-        }
+                'autoregressive': False,
+                'polyphony_hard_limit': global_options.polyphony_hard_limit
+            }
+            status['tracks'].append(track_config)
         
+        # Apply track-specific options if available
+        if track_options:
+            apply_track_options_to_status(status, track_options, global_options)
+        
+        # Build params from global options
         params = {
-            'tracks_per_step': 1,
-            'bars_per_step': 1,
-            'model_dim': 4,
-            'percentage': 100,
-            'batch_size': 1,
-            'temperature': temperature,
-            'max_steps': 200,
-            'polyphony_hard_limit': 6,
-            'shuffle': True,
+            'tracks_per_step': global_options.tracks_per_step,
+            'bars_per_step': global_options.bars_per_step,
+            'model_dim': global_options.model_dim,
+            'percentage': global_options.percentage,
+            'batch_size': global_options.batch_size,
+            'temperature': global_options.temperature,
+            'max_steps': global_options.max_steps,
+            'polyphony_hard_limit': global_options.polyphony_hard_limit,
+            'shuffle': global_options.shuffle,
             'verbose': False,
             'ckpt': CHECKPOINT_PATH,
-            'sampling_seed': -1,
-            'mask_top_k': 0
+            'sampling_seed': global_options.sampling_seed,
+            'mask_top_k': global_options.mask_top_k
         }
         
         if DEBUG:
-            print(f"  Running MidiGPT generation...")
+            print(f"\nMidiGPT Generation:")
+            print(f"  Status: {num_tracks} tracks configured")
+            print(f"  Selected bars: {status['tracks'][0]['selected_bars']}")
+            print(f"  Running generation...")
         
         # Convert to JSON strings
         status_str = json.dumps(status)
@@ -400,14 +545,12 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
         
-        # Use encoder.json_to_midi to convert back
         encoder.json_to_midi(midi_result_str, result_midi_path)
         
         if DEBUG:
             print(f"  Saved result MIDI: {result_midi_path}")
         
         # Convert MIDI to CA format with proper timing
-        # Pass the input timing parameters we captured earlier
         ca_result = convert_midi_to_ca_format_with_timing(
             result_midi_path,
             project_measures,
@@ -429,13 +572,15 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         LAST_OUTPUTS.add(ca_result)
         
         if DEBUG:
-            print(f"  Result CA format: {len(ca_result)} chars")
+            print(f"\nResult:")
+            print(f"  CA format: {len(ca_result)} chars")
+            print(f"  Preview: {ca_result[:100]}...")
         
         return ca_result
         
     except Exception as e:
         if DEBUG:
-            print(f'Error in MidiGPT processing: {e}')
+            print(f'\nError in MidiGPT processing: {e}')
             import traceback
             traceback.print_exc()
         
@@ -444,10 +589,11 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
 
 def start_server():
     print("="*60)
-    print("MidiGPT Server Starting (Patched with Timing Fixes)")
+    print("MidiGPT Server - With Parameter Support")
     print("="*60)
     print(f"Port: {PORT}")
     print(f"MidiGPT Available: {MIDIGPT_AVAILABLE}")
+    print(f"Parameter Functions Available: {PARAM_FUNCTIONS_AVAILABLE}")
     print(f"Debug Mode: {DEBUG}")
     print("="*60)
     print()
@@ -456,7 +602,13 @@ def start_server():
     server.register_function(call_nn_infill, 'call_nn_infill')
     
     print(f"Server ready and listening on port {PORT}")
-    print("Press Ctrl+C to stop")
+    if PARAM_FUNCTIONS_AVAILABLE:
+        print("Will read parameters from REAPER FX:")
+        print("  - midigpt Global Options (temperature, model_dim, etc.)")
+        print("  - midigpt Track Options (instrument, density, polyphony)")
+    else:
+        print("Parameter functions not available - using defaults")
+    print("\nPress Ctrl+C to stop")
     print()
     
     try:
