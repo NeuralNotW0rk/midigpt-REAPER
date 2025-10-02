@@ -1,4 +1,6 @@
-# rpr_midigpt_functions.py - Clean ASCII version
+# rpr_midigpt_functions.py - Fixed version with missing get_global_options
+import preprocessing_functions as pre
+
 
 def test_function():
     return "midigpt functions loaded"
@@ -20,69 +22,61 @@ class MidigptGlobalOptionsObj:
         self.generated_notes_are_selected = True
         self.display_warnings = True
         self.verbose = False
+        
+        # Add CA-compatible options that the REAPER script expects
+        self.do_rhythm_conditioning = False
+        self.rhythm_conditioning_type = 'none'
+        self.do_note_range_conditioning = False
+        self.note_range_conditioning_type = 'none'
+        self.enc_no_repeat_ngram_size = 0
 
 def get_midigpt_global_options():
     print("get_midigpt_global_options called")
     return MidigptGlobalOptionsObj()
+
+def get_global_options():
+    """CA-compatible function name that REAPER script expects"""
+    print("get_global_options called (midigpt version)")
+    return get_midigpt_global_options()
 
 def get_midigpt_track_options_by_track_idx():
     print("get_midigpt_track_options_by_track_idx called")
     return {}
 
 def build_midigpt_generation_request(global_options, track_options, project_data):
-    print("No need to build midigpt request - using proxy server")
+    print("No need to build midigpt request - using direct server")
     return None
 
 def call_midigpt_via_proxy(nn_input, options):
-    print("Calling midigpt via proxy server...")
+    """Legacy proxy method - not used in current unified architecture"""
+    print("call_midigpt_via_proxy called but not implemented")
+    print("Using direct call_nn_infill instead")
+    
+    # This should not be called in the unified architecture
+    # The REAPER script should use rpr_ca_functions.call_nn_infill directly
+    return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240"
+
+def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, has_fully_masked_inst=False,
+                   temperature=1.0, start_measure=None, end_measure=None):
+    """
+    Call the MidiGPT server via XML-RPC
+    Includes start_measure and end_measure for proper selection bounds
+    """
+    from xmlrpc.client import ServerProxy
+    import xmlrpc.client
+    import preprocessing_functions as pre
     
     try:
-        import xmlrpc.client
-        
-        print("Connecting to proxy server on port 3456...")
-        proxy = xmlrpc.client.ServerProxy('http://127.0.0.1:3456')
-        
-        print("Calling proxy.call_nn_infill with positional arguments...")
-        
-        # Convert nn_input.S to the format expected by proxy
-        import preprocessing_functions as pre
-        S_dict = pre.encode_midisongbymeasure_to_save_dict(nn_input.S)
-        
-        # Call with positional arguments in the correct order:
-        # call_nn_infill(s, S, use_sampling, min_length, enc_no_repeat_ngram_size, has_fully_masked_inst, temperature)
-        result = proxy.call_nn_infill(
-            nn_input.nn_input_string,     # s
-            S_dict,                       # S (as dict)
-            True,                         # use_sampling
-            10,                           # min_length
-            0,                            # enc_no_repeat_ngram_size
-            nn_input.has_fully_masked_inst, # has_fully_masked_inst
-            options.temperature           # temperature
-        )
-        
-        print("Proxy server returned result (length: " + str(len(str(result))) + ")")
-        return result
-        
+        proxy = ServerProxy('http://127.0.0.1:3456')
+        res = proxy.call_nn_infill(s, pre.encode_midisongbymeasure_to_save_dict(S), use_sampling, min_length, 
+                                   enc_no_repeat_ngram_size, has_fully_masked_inst, temperature,
+                                   start_measure, end_measure)
+        return res
+    except xmlrpc.client.Fault as e:
+        print('Exception raised by MidiGPT server:')
+        print(str(e))
+        raise
     except Exception as e:
-        print("ERROR calling proxy server: " + str(e))
-        import traceback
-        traceback.print_exc()
-        return None
-
-def get_global_options():
-    print("Compatibility get_global_options called")
-    
-    class CompatOptions:
-        def __init__(self):
-            self.temperature = 1.0
-            self.display_track_to_MIDI_inst = True
-            self.generated_notes_are_selected = True
-            self.display_warnings = True
-            self.do_rhythm_conditioning = False
-            self.rhythm_conditioning_type = None
-            self.do_note_range_conditioning = False
-            self.note_range_conditioning_type = None
-            self.enc_no_repeat_ngram_size = 3
-            self.variation_alg = 0
-    
-    return CompatOptions()
+        print('MidiGPT server connection failed. Make sure midigpt_server.py is running on port 3456.')
+        print(f'Error: {e}')
+        raise

@@ -6,3 +6,5 @@ src/Scripts/composers_assistant_v2/models_permuted_labels/
 /midigpt_dependencies
 /midigpt_workspace
 /src/Scripts/composers_assistant_v2/temp_midi
+/MIDI-GPT
+/venv
