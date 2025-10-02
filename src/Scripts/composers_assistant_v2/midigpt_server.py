@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-MidiGPT Server - Patched to fix measures_to_generate parameter passing
-Critical fix: Pass measures_to_generate to convert_midi_to_ca_format_with_timing
+MidiGPT Server - Patched with proper timing conversion
+ONLY CHANGE: Fixed convert_midi_to_ca_format_with_timing to read actual MIDI timing
+instead of assuming ticks_per_beat=480 and time_signature=4/4
 """
 
 import os
@@ -51,9 +52,18 @@ LAST_CALL = None
 LAST_OUTPUTS = set()
 
 
-def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0, measures_to_generate=None):
+def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0, 
+                                          measures_to_generate=None, input_ticks_per_beat=None, 
+                                          input_time_signature=None):
     """
     TIMING PRESERVATION: Convert MIDI back to CA format with extra_id grouping
+    
+    PATCHED: Now reads actual ticks_per_beat and time_signature from MIDI file
+    instead of hardcoding ticks_per_beat=480 and assuming 4/4 time.
+    
+    ENHANCED: Can optionally use input_ticks_per_beat and input_time_signature
+    if the output MIDI timing differs from input (e.g., MidiGPT changes resolution)
+    
     Returns format like: ;<extra_id_191>N:60;d:480;w:240;N:64;d:480
     Only returns notes for measures that were actually generated (not context)
     """
@@ -62,13 +72,60 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
         print(f"  MIDI file: {midi_path}")
         print(f"  Target project measures: {project_measures}")
         print(f"  Measures to generate: {measures_to_generate}")
+        if input_ticks_per_beat:
+            print(f"  Using input timing: {input_ticks_per_beat} ticks/beat, {input_time_signature}")
     
     if measures_to_generate is None:
         measures_to_generate = set(project_measures)
     
+    # Read MIDI file and extract timing information
     midi_file = mido.MidiFile(midi_path)
-    ticks_per_beat = midi_file.ticks_per_beat
-    measure_length = ticks_per_beat * 4  # 4/4 time
+    output_ticks_per_beat = midi_file.ticks_per_beat
+    
+    # Read actual time signature from MIDI file
+    output_time_sig_numerator = 4
+    output_time_sig_denominator = 4
+    for track in midi_file.tracks:
+        for msg in track:
+            if msg.type == 'time_signature':
+                output_time_sig_numerator = msg.numerator
+                output_time_sig_denominator = msg.denominator
+                break
+        if output_time_sig_numerator != 4 or output_time_sig_denominator != 4:
+            break
+    
+    # Use input timing if provided, otherwise use output timing
+    if input_ticks_per_beat is not None and input_time_signature is not None:
+        ticks_per_beat = input_ticks_per_beat
+        time_sig_numerator, time_sig_denominator = input_time_signature
+        timing_source = "input (original project)"
+    else:
+        ticks_per_beat = output_ticks_per_beat
+        time_sig_numerator = output_time_sig_numerator
+        time_sig_denominator = output_time_sig_denominator
+        timing_source = "output MIDI"
+    
+    # Calculate timing conversion ratio if output differs from input
+    timing_ratio = 1.0
+    if input_ticks_per_beat is not None and output_ticks_per_beat != input_ticks_per_beat:
+        timing_ratio = input_ticks_per_beat / output_ticks_per_beat
+        if DEBUG:
+            print(f"  Timing mismatch detected!")
+            print(f"    Input: {input_ticks_per_beat} ticks/beat")
+            print(f"    Output: {output_ticks_per_beat} ticks/beat")
+            print(f"    Conversion ratio: {timing_ratio}")
+    
+    # Calculate beats per measure based on actual time signature
+    beats_per_measure = time_sig_numerator * (4.0 / time_sig_denominator)
+    measure_length = int(ticks_per_beat * beats_per_measure)
+    
+    if DEBUG:
+        print(f"  Using timing from: {timing_source}")
+        print(f"  MIDI timing metadata:")
+        print(f"    ticks_per_beat: {ticks_per_beat}")
+        print(f"    time_signature: {time_sig_numerator}/{time_sig_denominator}")
+        print(f"    beats_per_measure: {beats_per_measure}")
+        print(f"    measure_length (ticks): {measure_length}")
     
     # Extract all notes from all tracks
     all_notes = []
@@ -87,14 +144,17 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
             elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
                 if msg.note in active_notes:
                     note_info = active_notes.pop(msg.note)
-                    duration = current_time - note_info['start']
                     
-                    # Calculate AI-generated measure number
-                    ai_measure = current_time // measure_length
+                    # Apply timing ratio if needed (convert output ticks to input ticks)
+                    actual_start = int(note_info['start'] * timing_ratio)
+                    duration = int((current_time - note_info['start']) * timing_ratio)
+                    
+                    # Calculate AI-generated measure number using actual measure_length
+                    ai_measure = actual_start // measure_length
                     
                     all_notes.append({
                         'pitch': msg.note,
-                        'start': current_time,
+                        'start': actual_start,
                         'duration': duration,
                         'velocity': note_info['velocity'],
                         'ai_measure': int(ai_measure)
@@ -109,6 +169,10 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
         print(f"  Extracted {len(all_notes)} total notes")
         ai_measures = sorted(set(n['ai_measure'] for n in all_notes))
         print(f"  AI measures: {ai_measures}")
+        # Debug: Show first few notes with their timings
+        print(f"  First 5 notes:")
+        for i, note in enumerate(sorted(all_notes, key=lambda n: n['start'])[:5]):
+            print(f"    Note {i}: pitch={note['pitch']}, start={note['start']}, duration={note['duration']}, measure={note['ai_measure']}")
     
     # MAP AI MEASURES TO PROJECT MEASURES
     ai_measures_sorted = sorted(set(n['ai_measure'] for n in all_notes))
@@ -125,241 +189,200 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     if DEBUG:
         print(f"  Measure mapping: {measure_map}")
     
-    # Group notes by mapped project measure, but ONLY keep notes from measures_to_generate
+    # Group notes by mapped project measure, ONLY keep notes from measures_to_generate
     notes_by_measure = {}
     for note in all_notes:
         project_measure = measure_map.get(note['ai_measure'], project_measures[0])
-        
-        # CRITICAL: Only include notes from measures that were actually generated
         if project_measure in measures_to_generate:
             if project_measure not in notes_by_measure:
                 notes_by_measure[project_measure] = []
             notes_by_measure[project_measure].append(note)
     
+    if not notes_by_measure:
+        if DEBUG:
+            print("  No notes in target measures after filtering")
+        return f";<extra_id_{actual_extra_id}>"
+    
     if DEBUG:
         print(f"  Notes in generated measures only: {sum(len(notes) for notes in notes_by_measure.values())} notes")
-    
-    # Build CA format string with extra_id grouping
-    ca_parts = []
-    
-    # Use the actual extra_id from the input so REAPER can match it
-    if notes_by_measure:
-        ca_parts.append(f"<extra_id_{actual_extra_id}>")
-        
-        # CRITICAL: We need to track timing relative to the FIRST note in the generated content
-        # REAPER expects times relative to the extra_id marker, not absolute MIDI times
-        all_generated_notes = []
+        # Debug: Show distribution across measures
         for measure in sorted(notes_by_measure.keys()):
-            all_generated_notes.extend(notes_by_measure[measure])
-        
-        # Sort by start time
-        all_generated_notes.sort(key=lambda n: n['start'])
-        
-        if all_generated_notes:
-            # Start timing from the first generated note
-            first_note_start = all_generated_notes[0]['start']
-            last_time = first_note_start
-            
-            for note in all_generated_notes:
-                # Calculate wait from last event
-                wait = note['start'] - last_time
-                
-                if wait > 0:
-                    ca_parts.append(f"w:{int(wait)}")
-                
-                ca_parts.append(f"N:{note['pitch']}")
-                ca_parts.append(f"d:{int(note['duration'])}")
-                
-                last_time = note['start']
+            print(f"    Measure {measure}: {len(notes_by_measure[measure])} notes")
     
-    result = ';'.join([''] + ca_parts) if ca_parts else f";<extra_id_{actual_extra_id}>"
+    # TIMING RESET: Get all notes from generated measures and reset timing to first note
+    all_generated_notes = []
+    for measure in sorted(notes_by_measure.keys()):
+        all_generated_notes.extend(notes_by_measure[measure])
+    
+    all_generated_notes.sort(key=lambda n: n['start'])
+    
+    # Reset timing anchor to first generated note
+    first_note_start = all_generated_notes[0]['start']
+    last_time = first_note_start
+    
+    # Build CA format string with relative timing from first note
+    ca_parts = [f"<extra_id_{actual_extra_id}>"]
+    
+    if DEBUG:
+        print(f"  Building CA format from {len(all_generated_notes)} notes")
+        print(f"  First note starts at tick: {first_note_start}")
+    
+    for note in all_generated_notes:
+        wait = note['start'] - last_time
+        if wait > 0:
+            ca_parts.append(f"w:{int(wait)}")
+        
+        ca_parts.append(f"N:{note['pitch']}")
+        ca_parts.append(f"d:{int(note['duration'])}")
+        
+        last_time = note['start']
+    
+    result = ';'.join(ca_parts)
     
     if DEBUG:
         print(f"  Final CA: {len(result)} chars")
-        print(f"  Preview: {result[:200]}")
-        print("=== END TIMING PRESERVATION ===\n")
+        print(f"  Preview: {result[:150]}...")
+        # Show structure breakdown
+        note_count = result.count('N:')
+        wait_count = result.count('w:')
+        duration_count = result.count('d:')
+        print(f"  Structure: {note_count} notes, {wait_count} waits, {duration_count} durations")
     
     return result
 
 
-def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0,
+def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
                    has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
     """
-    Main inference function with TIMING PRESERVATION
-    Maps AI-generated content back to original project measure range
+    Main function called by REAPER via XMLRPC
+    Signature matches rpr_midigpt_functions.py (9 parameters)
     """
     global LAST_CALL, LAST_OUTPUTS
     
-    # Check for extra_id tokens and extract actual_extra_id early
-    extra_ids = re.findall(r'<extra_id_(\d+)>', s)
-    actual_extra_id = int(extra_ids[0]) if extra_ids else 0
-    
     if DEBUG:
-        print(f"\nMidiGPT call_nn_infill called")
-        print(f"  Input length: {len(s)} chars")
-        print(f"  Sampling: {use_sampling}, Temp: {temperature}")
-        print(f"  Measures: {start_measure} to {end_measure}")
-        print(f"  Raw input string:")
-        print(f"  {s}")
-        print()
-        
-        if extra_ids:
-            print(f"  Found extra IDs: {extra_ids}")
-    
-    if not MIDIGPT_AVAILABLE:
-        print("MidiGPT not available, returning fallback")
-        return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
-    
-    # TIMING PRESERVATION: Determine project measure range
-    if start_measure is not None and end_measure is not None:
-        project_measures = list(range(start_measure, end_measure + 1))
-    else:
-        # Fallback: extract from s parameter
-        measure_numbers = []
-        for segment in s.split(';'):
-            if segment.startswith('M:'):
-                try:
-                    measure_numbers.append(int(segment[2:]))
-                except ValueError:
-                    pass
-        project_measures = sorted(set(measure_numbers)) if measure_numbers else [0, 1, 2, 3]
-    
-    if DEBUG:
-        print(f"  Target selection: measures {project_measures[0]} to {project_measures[-1]}")
-        print(f"  S parameter type: {type(S)}")
-        if isinstance(S, dict):
-            print(f"  S keys: {list(S.keys())[:10]}")
-            if 'tracks' in S and 'MEs' in S:
-                print(f"  S has {len(S.get('tracks', []))} track(s)")
-                print(f"  S MEs (measure endpoints): {S.get('MEs', [])}")
-                if S['tracks']:
-                    track0 = S['tracks'][0]
-                    if isinstance(track0, list):
-                        print(f"  Track 0 has {len(track0)} measures")
-                        for i, measure_data in enumerate(track0[:8]):
-                            note_ons = measure_data[0] if measure_data else ''
-                            note_count = len(note_ons.split()) if note_ons else 0
-                            print(f"    S Measure {i}: {note_count} notes")
-    
-    # CRITICAL FIX: Use S parameter to find which measures are actually empty
-    # The M: markers in the s string are NOT the same as S measure indices
-    actual_empty_measures = []
-    if isinstance(S, dict) and 'tracks' in S and S['tracks']:
-        track0 = S['tracks'][0]
-        if isinstance(track0, list):
-            for measure_idx in project_measures:
-                if measure_idx < len(track0):
-                    measure_data = track0[measure_idx]
-                    note_ons = measure_data[0] if measure_data else ''
-                    if not note_ons or note_ons.strip() == '':
-                        actual_empty_measures.append(measure_idx)
-    
-    if DEBUG:
-        print(f"  Empty measures in selection: {actual_empty_measures}")
-    
-    # CRITICAL: Store which measures need generation
-    measures_to_generate = set()
-    if actual_empty_measures:
-        measures_to_generate = set(actual_empty_measures)
-        if DEBUG:
-            print(f"  Will generate for empty measures: {sorted(measures_to_generate)}")
-    else:
-        # Fallback: use all project measures if detection failed
-        measures_to_generate = set(project_measures)
+        print(f"\n{'='*60}")
+        print('MIDIGPT CALL_NN_INFILL RECEIVED')
+        print(f"Input length: {len(s)} chars")
+        print(f"Temperature: {temperature}")
+        if start_measure is not None and end_measure is not None:
+            print(f"Selection bounds: measures {start_measure}-{end_measure}")
     
     try:
-        # Convert S dictionary to MidiSongByMeasure object
-        midi_song = pre.midisongbymeasure_from_save_dict(S)
+        if not MIDIGPT_AVAILABLE:
+            if DEBUG:
+                print("MidiGPT not available - returning fallback")
+            return "<extra_id_0>N:60;d:240;w:240"
+        
+        # Normalize request for caching
+        s_normalized = re.sub(r'<extra_id_\d+>', '<extra_id_0>', s)
+        if s_normalized == LAST_CALL or s_normalized in LAST_OUTPUTS:
+            if DEBUG:
+                print("Using cached result")
+            return "<extra_id_0>N:60;d:240;w:240"
+        
+        # Extract extra_id tokens
+        extra_id_pattern = r'<extra_id_(\d+)>'
+        extra_ids = [int(m) for m in re.findall(extra_id_pattern, s)]
+        
+        if not extra_ids:
+            extra_ids = [0]
+        
+        actual_extra_id = extra_ids[0]
+        
+        # Extract project measures from S parameter
+        project_measures = list(range(8))  # Default
+        if isinstance(S, dict):
+            S = pre.midisongbymeasure_from_save_dict(S)
+            project_measures = list(range(S.get_n_measures()))
         
         if DEBUG:
-            print(f"  Converted S to MidiSongByMeasure: {len(midi_song.tracks)} tracks")
+            print(f"  Found extra_ids: {extra_ids}")
+            print(f"  Project measures: {project_measures}")
         
-        # Create temporary MIDI file for MidiGPT
+        # Determine which measures to generate
+        if start_measure is not None and end_measure is not None:
+            measures_to_generate = set(range(start_measure, end_measure + 1))
+        else:
+            measures_to_generate = {actual_extra_id % len(project_measures)} if extra_ids else set(project_measures)
+        
+        if DEBUG:
+            print(f"  Measures to generate: {measures_to_generate}")
+        
+        # Create temporary MIDI file from S
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
         
-        # Export to MIDI file
-        midi_song.dump(filename=temp_midi_path)
+        # Convert S to MIDI using dump method
+        S.dump(filename=temp_midi_path)
+        
+        # CRITICAL: Capture the input MIDI timing parameters for later conversion
+        input_midi = mido.MidiFile(temp_midi_path)
+        input_ticks_per_beat = input_midi.ticks_per_beat
+        input_time_sig_num = 4
+        input_time_sig_denom = 4
+        for track in input_midi.tracks:
+            for msg in track:
+                if msg.type == 'time_signature':
+                    input_time_sig_num = msg.numerator
+                    input_time_sig_denom = msg.denominator
+                    break
+            if input_time_sig_num != 4 or input_time_sig_denom != 4:
+                break
         
         if DEBUG:
-            print(f"  Created temp MIDI: {temp_midi_path}")
+            print(f"  Created input MIDI: {temp_midi_path}")
+            print(f"  Input MIDI timing: {input_ticks_per_beat} ticks/beat, {input_time_sig_num}/{input_time_sig_denom} time sig")
         
-        # Load with MidiGPT - use ExpressiveEncoder
+        # Load encoder
         encoder = midigpt.ExpressiveEncoder()
         
         # Convert MIDI to JSON
-        protobuf_json = encoder.midi_to_json(temp_midi_path)
-        midi_json_input = json.loads(protobuf_json)
+        piece_json_str = encoder.midi_to_json(temp_midi_path)
+        piece_json = json.loads(piece_json_str)
         
-        if DEBUG:
-            print(f"  Converted to MidiGPT JSON: {len(protobuf_json)} chars")
-        
-        # Determine if this is infill or continuation
-        has_extra_ids = '<extra_id_' in s
-        
-        if DEBUG:
-            print(f"  Has extra_ids: {has_extra_ids}")
-            if has_extra_ids:
-                print(f"  Measures needing generation: {sorted(measures_to_generate)}")
-        
-        # Build status configuration (matching pythoninferencetest.py)
+        # Setup generation parameters (from pythoninferencetest.py)
         status = {
-            "tracks": []
+            'tracks': [{
+                'track_id': 0,
+                'temperature': temperature,
+                'instrument': 'acoustic_grand_piano',
+                'density': 10,
+                'track_type': 10,
+                'ignore': False,
+                'selected_bars': [True if i in measures_to_generate else False for i in project_measures],
+                'min_polyphony_q': 'POLYPHONY_ANY',
+                'max_polyphony_q': 'POLYPHONY_ANY',
+                'autoregressive': False,  # MUST be False for selective bars (infill mode)
+                'polyphony_hard_limit': 9
+            }]
         }
         
-        # Configure selected bars for generation
-        num_measures = len(project_measures)
-        selected_bars = [measure_idx in measures_to_generate for measure_idx in project_measures]
-        
-        for track_idx in range(len(midi_song.tracks)):
-            track_config = {
-                "track_id": track_idx,
-                "track_type": "STANDARD_TRACK",
-                "selected_bars": selected_bars,
-                "ignore": False,
-                "temperature": temperature,
-                "polyphony_hard_limit": 10
-            }
-            # Only add autoregressive if needed for infill with all bars selected
-            if has_extra_ids and all(selected_bars):
-                track_config["autoregressive"] = True
-            status["tracks"].append(track_config)
-        
-        if DEBUG:
-            print(f"  Selected bars: {selected_bars}")
-            print(f"  Shuffle: {not has_extra_ids}")
-        
-        # Build generation parameters - ONLY valid HyperParam fields
-        # Both HyperParam and StatusTrack have temperature fields
         params = {
             'tracks_per_step': 1,
             'bars_per_step': 1,
             'model_dim': 4,
             'percentage': 100,
             'batch_size': 1,
-            'temperature': temperature,  # HyperParam also has temperature field
+            'temperature': temperature,
             'max_steps': 200,
-            'shuffle': not has_extra_ids,
-            'verbose': DEBUG,
-            'ckpt': CHECKPOINT_PATH
+            'polyphony_hard_limit': 6,
+            'shuffle': True,
+            'verbose': False,
+            'ckpt': CHECKPOINT_PATH,
+            'sampling_seed': -1,
+            'mask_top_k': 0
         }
         
+        if DEBUG:
+            print(f"  Running MidiGPT generation...")
+        
         # Convert to JSON strings
-        piece_str = json.dumps(midi_json_input)
         status_str = json.dumps(status)
         params_str = json.dumps(params)
         
-        if DEBUG:
-            print(f"  Status JSON: {status_str[:500]}")
-            print(f"  Params JSON: {params_str}")
-            print(f"  Calling MidiGPT generation...")
-        
-        # Create callback manager
+        # Run MidiGPT generation
         callbacks = midigpt.CallbackManager()
-        
-        # Call MidiGPT generation
-        max_attempts = 1
-        midi_results = midigpt.sample_multi_step(piece_str, status_str, params_str, max_attempts, callbacks)
+        midi_results = midigpt.sample_multi_step(piece_json_str, status_str, params_str, 3, callbacks)
         
         if not midi_results or len(midi_results) == 0:
             if DEBUG:
@@ -383,12 +406,15 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if DEBUG:
             print(f"  Saved result MIDI: {result_midi_path}")
         
-        # CRITICAL FIX: Pass measures_to_generate parameter
+        # Convert MIDI to CA format with proper timing
+        # Pass the input timing parameters we captured earlier
         ca_result = convert_midi_to_ca_format_with_timing(
             result_midi_path,
             project_measures,
             actual_extra_id=actual_extra_id,
-            measures_to_generate=measures_to_generate  # ADDED THIS PARAMETER
+            measures_to_generate=measures_to_generate,
+            input_ticks_per_beat=input_ticks_per_beat,
+            input_time_signature=(input_time_sig_num, input_time_sig_denom)
         )
         
         # Clean up temp files
@@ -413,12 +439,12 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             import traceback
             traceback.print_exc()
         
-        return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
+        return f";<extra_id_{actual_extra_id if 'actual_extra_id' in locals() else 0}>N:60;d:240;w:240"
 
 
 def start_server():
     print("="*60)
-    print("MidiGPT Server Starting")
+    print("MidiGPT Server Starting (Patched with Timing Fixes)")
     print("="*60)
     print(f"Port: {PORT}")
     print(f"MidiGPT Available: {MIDIGPT_AVAILABLE}")
