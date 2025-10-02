@@ -123,16 +123,20 @@ def convert_midi_to_ca_format(midi_path):
     return result
 
 
-def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0):
+def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_extra_id=0, measures_to_generate=None):
     """
     TIMING PRESERVATION: Convert MIDI back to CA format with extra_id grouping
     Returns format like: ;<extra_id_191>N:60;d:480;w:240;N:64;d:480
-    Uses the actual extra_id from the input so REAPER can match it
+    Only returns notes for measures that were actually generated (not context)
     """
     if DEBUG:
         print(f"\n=== TIMING PRESERVATION CONVERSION ===")
         print(f"  MIDI file: {midi_path}")
         print(f"  Target project measures: {project_measures}")
+        print(f"  Measures to generate: {measures_to_generate}")
+    
+    if measures_to_generate is None:
+        measures_to_generate = set(project_measures)
     
     midi_file = mido.MidiFile(midi_path)
     ticks_per_beat = midi_file.ticks_per_beat
@@ -170,11 +174,11 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     
     if not all_notes:
         if DEBUG:
-            print("  No notes found - returning empty for extra_id_0")
-        return ";<extra_id_0>"
+            print("  No notes found - returning empty for extra_id")
+        return f";<extra_id_{actual_extra_id}>"
     
     if DEBUG:
-        print(f"  Extracted {len(all_notes)} notes")
+        print(f"  Extracted {len(all_notes)} total notes")
         ai_measures = sorted(set(n['ai_measure'] for n in all_notes))
         print(f"  AI measures: {ai_measures}")
     
@@ -193,33 +197,36 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     if DEBUG:
         print(f"  Measure mapping: {measure_map}")
     
-    # Group notes by mapped project measure
+    # Group notes by mapped project measure, but ONLY keep notes from measures_to_generate
     notes_by_measure = {}
     for note in all_notes:
         project_measure = measure_map.get(note['ai_measure'], project_measures[0])
-        if project_measure not in notes_by_measure:
-            notes_by_measure[project_measure] = []
-        notes_by_measure[project_measure].append(note)
+        
+        # CRITICAL: Only include notes from measures that were actually generated
+        if project_measure in measures_to_generate:
+            if project_measure not in notes_by_measure:
+                notes_by_measure[project_measure] = []
+            notes_by_measure[project_measure].append(note)
+    
+    if DEBUG:
+        print(f"  Notes in generated measures only: {sum(len(notes) for notes in notes_by_measure.values())} notes")
     
     # Build CA format string with extra_id grouping
-    # Format: ;<extra_id_X>N:pitch;d:duration;w:wait;N:pitch;d:duration;...
     ca_parts = []
     
     # Use the actual extra_id from the input (e.g., 191) so REAPER can match it
-    # Group all generated notes under this single extra_id
     if notes_by_measure:
         ca_parts.append(f"<extra_id_{actual_extra_id}>")
         
-        # Combine all measures' notes into one instruction list
+        # Combine all generated measures' notes into one instruction list
         all_measure_notes = []
         for measure in sorted(notes_by_measure.keys()):
             all_measure_notes.extend(sorted(notes_by_measure[measure], key=lambda n: n['start']))
         
         if all_measure_notes:
-            last_time = 0  # Start from beginning
+            last_time = 0
             
             for note in all_measure_notes:
-                # Calculate wait time from last event
                 wait = note['start'] - last_time
                 
                 if wait > 0:
@@ -230,10 +237,9 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
                 
                 last_time = note['start']
     
-    result = ';'.join([''] + ca_parts)
+    result = ';'.join([''] + ca_parts) if ca_parts else f";<extra_id_{actual_extra_id}>"
     
     if DEBUG:
-        print(f"  Mapped to measures: {sorted(notes_by_measure.keys())}")
         print(f"  Final CA: {len(result)} chars")
         print(f"  Preview: {result[:200]}")
         print("=== END TIMING PRESERVATION ===\n")
