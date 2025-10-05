@@ -4,7 +4,6 @@ MidiGPT Server - Complete with streamlined parameter support
 - Reads parameters from REAPER FX (Global and Track Options)
 - Applies them to MidiGPT generation
 - Includes timing conversion fixes
-- Fixed measure selection logic
 """
 
 import os
@@ -429,43 +428,15 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             print(f"\nData Processing:")
             print(f"  Found extra_ids: {extra_ids}")
             print(f"  Project measures: {project_measures}")
-            print(f"  CA string (first 500 chars):")
-            print(f"  {s[:500]}")
         
-        # FIXED: Determine which measures to generate
-        # The CA string M: markers are relative to encoding, not absolute project measures
-        # Instead, detect which measures in the selection are actually empty by checking S
-        measures_to_generate = set()
-        
-        if DEBUG:
-            print(f"  Detecting empty measures in selection {start_measure}-{end_measure}...")
-        
-        # Check which measures in the selection range are empty
+        # Determine which measures to generate
         if start_measure is not None and end_measure is not None:
-            for measure_idx in range(start_measure, end_measure + 1):
-                # Check if this measure is empty across all tracks
-                is_empty = True
-                for track in S.tracks:
-                    if measure_idx < len(track.tracks_by_measure):
-                        measure_track = track.tracks_by_measure[measure_idx]
-                        if measure_track.note_ons:
-                            is_empty = False
-                            break
-                
-                if is_empty:
-                    measures_to_generate.add(measure_idx)
-                    if DEBUG:
-                        print(f"    Measure {measure_idx} is empty")
-        
-        # Fallback: if we found no empty measures but have extra_id tokens, 
-        # assume the last measure in selection is the target
-        if not measures_to_generate and extra_ids and end_measure is not None:
-            measures_to_generate = {end_measure}
-            if DEBUG:
-                print(f"    No empty measures detected, using end of selection: {end_measure}")
+            measures_to_generate = set(range(start_measure, end_measure + 1))
+        else:
+            measures_to_generate = {actual_extra_id % len(project_measures)} if extra_ids else set(project_measures)
         
         if DEBUG:
-            print(f"  Measures to generate (project space): {sorted(measures_to_generate)}")
+            print(f"  Measures to generate: {measures_to_generate}")
         
         # Create temporary MIDI file from S
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
@@ -504,28 +475,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if num_tracks == 0:
             num_tracks = 1
         
-        # Build selected_bars - mark which measures in the project need generation
-        # WORKAROUND: MidiGPT crashes with sparse selections, so we mark a contiguous window
-        # around the target measures instead of just the target measures
-        selected_bars = [False] * len(project_measures)
-        
-        if measures_to_generate:
-            # Find the range of measures to generate
-            min_measure = min(measures_to_generate)
-            max_measure = max(measures_to_generate)
-            
-            # Mark a window around the target: 1 bar before to 1 bar after
-            # This gives MidiGPT proper context and avoids segfaults
-            window_start = max(0, min_measure - 1)
-            window_end = min(len(project_measures) - 1, max_measure + 1)
-            
-            for i in range(window_start, window_end + 1):
-                selected_bars[i] = True
-            
-            if DEBUG:
-                print(f"  Selected bars window: [{window_start}:{window_end+1}] (target: {sorted(measures_to_generate)})")
-        
-        # Build status configuration
+        # Build status configuration with defaults
         status = {'tracks': []}
         
         for track_idx in range(num_tracks):
@@ -536,12 +486,11 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                 'density': 10,
                 'track_type': 'STANDARD_TRACK',
                 'ignore': False,
-                'selected_bars': selected_bars,
+                'selected_bars': [True if i in measures_to_generate else False for i in project_measures],
                 'min_polyphony_q': 'POLYPHONY_ANY',
                 'max_polyphony_q': 'POLYPHONY_ANY',
                 'autoregressive': False,
-                'polyphony_hard_limit': global_options.polyphony_hard_limit,
-                'bars': [{'ts_numerator': 4, 'ts_denominator': 4}] * len(project_measures)
+                'polyphony_hard_limit': global_options.polyphony_hard_limit
             }
             status['tracks'].append(track_config)
         
@@ -549,7 +498,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if track_options:
             apply_track_options_to_status(status, track_options, global_options)
         
-        # Build params - let MidiGPT determine model_dim internally
+        # Build params from global options
         params = {
             'tracks_per_step': global_options.tracks_per_step,
             'bars_per_step': global_options.bars_per_step,
@@ -560,7 +509,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             'max_steps': global_options.max_steps,
             'polyphony_hard_limit': global_options.polyphony_hard_limit,
             'shuffle': global_options.shuffle,
-            'verbose': False,  # Disable verbose to avoid console spam
+            'verbose': False,
             'ckpt': CHECKPOINT_PATH,
             'sampling_seed': global_options.sampling_seed,
             'mask_top_k': global_options.mask_top_k
@@ -569,9 +518,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if DEBUG:
             print(f"\nMidiGPT Generation:")
             print(f"  Status: {num_tracks} tracks configured")
-            print(f"  Project has {len(project_measures)} measures")
-            print(f"  Measures to generate: {sorted(measures_to_generate)}")
-            print(f"  Selected bars: {selected_bars}")
+            print(f"  Selected bars: {status['tracks'][0]['selected_bars']}")
             print(f"  Running generation...")
         
         # Convert to JSON strings
@@ -593,10 +540,6 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         
         if DEBUG:
             print(f"  Generated: {len(midi_result_str)} chars")
-            # Check how many bars are in the result
-            if 'tracks' in result_json and result_json['tracks']:
-                result_bars = len(result_json['tracks'][0].get('bars', []))
-                print(f"  Result contains {result_bars} bars (expected {len(project_measures)})")
         
         # Convert result back to MIDI file
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
