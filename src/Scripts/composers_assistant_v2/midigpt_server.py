@@ -4,6 +4,7 @@ MidiGPT Server - Complete with streamlined parameter support
 - Reads parameters from REAPER FX (Global and Track Options)
 - Applies them to MidiGPT generation
 - Includes timing conversion fixes
+- PATCHED: Correctly parses CA string to find target measure
 """
 
 import os
@@ -67,6 +68,25 @@ LAST_CALL = None
 LAST_OUTPUTS = set()
 
 
+def parse_extra_id_measure_from_ca(s):
+    """
+    Extract which measure the extra_id appears at in the CA string.
+    The CA string encodes the target measure through M: markers.
+    
+    Example: ;M:7;...notes...;M:3;<extra_id_85> means generate at measure 3
+    """
+    parts = s.split(';')
+    current_measure = 0
+    
+    for part in parts:
+        if part.startswith('M:'):
+            current_measure = int(part[2:])
+        elif part.startswith('<extra_id_'):
+            return current_measure
+    
+    return 0
+
+
 def apply_track_options_to_status(status_json, track_options_by_idx, global_options):
     """
     Apply track-specific options from REAPER FX to MidiGPT status configuration.
@@ -127,7 +147,7 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     Can optionally use input_ticks_per_beat and input_time_signature
     if the output MIDI timing differs from input (e.g., MidiGPT changes resolution)
     
-    Returns format like: ;<extra_id_191>N:60;d:480;w:240;N:64;d:480
+    Returns format like: M:3;<extra_id_191>N:60;d:480;w:240;N:64;d:480
     Only returns notes for measures that were actually generated (not context)
     """
     if DEBUG:
@@ -226,7 +246,8 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     if not all_notes:
         if DEBUG:
             print("  No notes found - returning empty for extra_id")
-        return f";<extra_id_{actual_extra_id}>"
+        target_measure = min(measures_to_generate) if measures_to_generate else 0
+        return f";M:{target_measure};<extra_id_{actual_extra_id}>"
     
     if DEBUG:
         print(f"  Extracted {len(all_notes)} total notes")
@@ -260,7 +281,8 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     if not notes_by_measure:
         if DEBUG:
             print("  No notes in target measures after filtering")
-        return f";<extra_id_{actual_extra_id}>"
+        target_measure = min(measures_to_generate) if measures_to_generate else 0
+        return f";M:{target_measure};<extra_id_{actual_extra_id}>"
     
     if DEBUG:
         print(f"  Notes in generated measures: {sum(len(notes) for notes in notes_by_measure.values())} notes")
@@ -276,11 +298,12 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     first_note_start = all_generated_notes[0]['start']
     last_time = first_note_start
     
-    # Build CA format string with relative timing from first note
-    ca_parts = [f"<extra_id_{actual_extra_id}>"]
+    # Build CA format string with MEASURE MARKER, then extra_id, then relative timing
+    target_measure = min(measures_to_generate) if measures_to_generate else 0
+    ca_parts = [f"M:{target_measure}", f"<extra_id_{actual_extra_id}>"]
     
     if DEBUG:
-        print(f"  Building CA format from {len(all_generated_notes)} notes")
+        print(f"  Building CA format from {len(all_generated_notes)} notes at measure {target_measure}")
     
     for note in all_generated_notes:
         wait = note['start'] - last_time
@@ -297,7 +320,7 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, actual_ex
     if DEBUG:
         print(f"  Final CA: {len(result)} chars")
         note_count = result.count('N:')
-        print(f"  Structure: {note_count} notes")
+        print(f"  Structure: {note_count} notes at M:{target_measure}")
     
     return result
 
@@ -360,7 +383,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             except Exception as e:
                 if DEBUG:
                     print(f"Could not read parameters from REAPER: {e}")
-                # Create defaults - capture temperature first to avoid scoping issue
+                # Create defaults
                 temp_val = temperature
                 
                 class DefaultGlobalOptions:
@@ -423,20 +446,60 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if isinstance(S, dict):
             S = pre.midisongbymeasure_from_save_dict(S)
             project_measures = list(range(S.get_n_measures()))
+
+        if DEBUG:
+            print(f"\n=== S STRUCTURE DEBUG ===")
+            for track_idx, track in enumerate(S.tracks):
+                print(f"Track {track_idx}:")
+                for measure_idx, m_track in enumerate(track.tracks_by_measure):
+                    note_count = len(m_track.note_ons) if hasattr(m_track, 'note_ons') else 0
+                    print(f"  Measure {measure_idx}: {note_count} notes")
+                    if measure_idx == 3:
+                        print(f"    Measure 3 details: note_ons={m_track.note_ons if hasattr(m_track, 'note_ons') else 'no attr'}")
+
         
         if DEBUG:
             print(f"\nData Processing:")
             print(f"  Found extra_ids: {extra_ids}")
             print(f"  Project measures: {project_measures}")
+            print(f"  CA string (first 500 chars):")
+            print(f"  {s[:500]}")
         
-        # Determine which measures to generate
+        # FIXED: When extra_ids present, generate for entire selection
+        measures_to_generate = set()
+
         if start_measure is not None and end_measure is not None:
-            measures_to_generate = set(range(start_measure, end_measure + 1))
-        else:
-            measures_to_generate = {actual_extra_id % len(project_measures)} if extra_ids else set(project_measures)
-        
+            if extra_ids:
+                # Generate for entire selection (handles selected multi-measure items)
+                measures_to_generate = set(range(start_measure, end_measure + 1))
+                if DEBUG:
+                    print(f"  Extra_ids present - generating for selection: {sorted(measures_to_generate)}")
+            else:
+                # Fallback: check for empty (shouldn't happen)
+                selection_range = range(start_measure, end_measure + 1)
+                for measure_idx in selection_range:
+                    is_empty = True
+                    for track in S.tracks:
+                        if measure_idx < len(track.tracks_by_measure):
+                            measure_track = track.tracks_by_measure[measure_idx]
+                            if hasattr(measure_track, 'note_ons') and measure_track.note_ons:
+                                is_empty = False
+                                break
+                    if is_empty:
+                        measures_to_generate.add(measure_idx)
+
         if DEBUG:
-            print(f"  Measures to generate: {measures_to_generate}")
+            print(f"  Measures to generate: {sorted(measures_to_generate)}")
+        
+        # Create temporary MIDI file from S
+
+        # If we have extra_ids but found no empty measures,
+        # this means selected non-empty items need replacement
+        # Generate anyway - REAPER will map correctly via extra_id
+        if not measures_to_generate and extra_ids:
+            measures_to_generate = {end_measure}
+            if DEBUG:
+                print(f"  No empty measures, but extra_ids present - selected item replacement")
         
         # Create temporary MIDI file from S
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
@@ -518,6 +581,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if DEBUG:
             print(f"\nMidiGPT Generation:")
             print(f"  Status: {num_tracks} tracks configured")
+            print(f"  Project has {len(project_measures)} measures")
+            print(f"  Measures to generate: {sorted(measures_to_generate)}")
             print(f"  Selected bars: {status['tracks'][0]['selected_bars']}")
             print(f"  Running generation...")
         
@@ -532,7 +597,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if not midi_results or len(midi_results) == 0:
             if DEBUG:
                 print("  MidiGPT returned empty result")
-            return f";<extra_id_{actual_extra_id}>N:60;d:240;w:240"
+            return f";M:{target_measure_from_ca};<extra_id_{actual_extra_id}>N:60;d:240;w:240"
         
         # Parse first result
         midi_result_str = midi_results[0]
@@ -584,7 +649,11 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             import traceback
             traceback.print_exc()
         
-        return f";<extra_id_{actual_extra_id if 'actual_extra_id' in locals() else 0}>N:60;d:240;w:240"
+        target_measure = 0
+        if 'target_measure_from_ca' in locals():
+            target_measure = target_measure_from_ca
+        
+        return f";M:{target_measure};<extra_id_{actual_extra_id if 'actual_extra_id' in locals() else 0}>N:60;d:240;w:240"
 
 
 def start_server():
