@@ -334,7 +334,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     import xmlrpc.client
     
     try:
-        proxy = ServerProxy('http://127.0.0.1:3456')
+        proxy = ServerProxy('http://127.0.0.1:3455')
         res = proxy.call_nn_infill(s, pre.encode_midisongbymeasure_to_save_dict(S), use_sampling, min_length, 
                                    enc_no_repeat_ngram_size, has_fully_masked_inst, temperature,
                                    start_measure, end_measure)
