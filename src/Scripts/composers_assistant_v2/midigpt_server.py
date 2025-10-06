@@ -4,7 +4,29 @@ MidiGPT Server - Complete with streamlined parameter support
 - Reads parameters from REAPER FX (Global and Track Options)
 - Applies them to MidiGPT generation
 - Includes timing conversion fixes
-- PATCHED: Correctly parses CA string to find target measure
+- ARCHITECTURE: Uses S structure and selection bounds, not CA string parsing
+  (M: markers in CA strings represent LOUDNESS levels, not measure indices)
+
+CRITICAL CA FORMAT UNDERSTANDING:
+-------------------------------
+The CA (Composer's Assistant) string format encodes musical data for neural networks.
+Key markers in CA strings:
+
+  M:X - Loudness level (0-7), NOT measure index
+  B:X - Tempo level (0-7)
+  L:X - Measure length in clicks
+  I:X - Instrument index
+  N:X - Note pitch
+  d:X - Note duration
+  w:X - Wait time
+  <extra_id_X> - Mask token indicating generation position
+
+DO NOT parse M: markers as measure indices. The authoritative sources are:
+  1. S structure (MidiSongByMeasure) - contains actual measure content
+  2. start_measure/end_measure parameters - define time selection from REAPER
+  3. extra_id presence - indicates REAPER selected items for generation
+
+The CA string is an encoding artifact for the neural network, not an interface format.
 """
 
 import os
@@ -68,23 +90,45 @@ LAST_CALL = None
 LAST_OUTPUTS = set()
 
 
-def parse_extra_id_measure_from_ca(s):
+def detect_measures_to_generate(S, start_measure, end_measure, extra_ids_present, debug=False):
     """
-    Extract which measure the extra_id appears at in the CA string.
-    The CA string encodes the target measure through M: markers.
+    Detect which measures need generation based on S structure and selection.
     
-    Example: ;M:7;...notes...;M:3;<extra_id_85> means generate at measure 3
+    Architecture:
+    - M: markers in CA strings represent LOUDNESS (0-7), not measure indices
+    - S structure is the authoritative source for measure content
+    - start_measure/end_measure define the time range from REAPER
+    - extra_ids indicate REAPER has selected items, but we must check S to find empty measures
+    
+    Returns:
+        set: Measure indices that need generation
     """
-    parts = s.split(';')
-    current_measure = 0
+    measures_to_generate = set()
     
-    for part in parts:
-        if part.startswith('M:'):
-            current_measure = int(part[2:])
-        elif part.startswith('<extra_id_'):
-            return current_measure
+    if start_measure is None or end_measure is None:
+        return measures_to_generate
     
-    return 0
+    # Always detect empty measures within the selection
+    # The presence of extra_ids just confirms REAPER has items selected
+    if debug:
+        print(f"  Strategy: detect empty measures within selection {start_measure}-{end_measure}")
+    
+    for measure_idx in range(start_measure, end_measure + 1):
+        is_empty = True
+        for track in S.tracks:
+            if measure_idx < len(track.tracks_by_measure):
+                measure_track = track.tracks_by_measure[measure_idx]
+                if hasattr(measure_track, 'note_ons') and measure_track.note_ons:
+                    is_empty = False
+                    break
+        if is_empty:
+            measures_to_generate.add(measure_idx)
+            if debug:
+                print(f"    Measure {measure_idx}: empty (will generate)")
+        elif debug:
+            print(f"    Measure {measure_idx}: has content (skip)")
+    
+    return measures_to_generate
 
 
 def apply_track_options_to_status(status_json, track_options_by_idx, global_options):
@@ -454,8 +498,6 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                 for measure_idx, m_track in enumerate(track.tracks_by_measure):
                     note_count = len(m_track.note_ons) if hasattr(m_track, 'note_ons') else 0
                     print(f"  Measure {measure_idx}: {note_count} notes")
-                    if measure_idx == 3:
-                        print(f"    Measure 3 details: note_ons={m_track.note_ons if hasattr(m_track, 'note_ons') else 'no attr'}")
 
         
         if DEBUG:
@@ -465,34 +507,15 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             print(f"  CA string (first 500 chars):")
             print(f"  {s[:500]}")
         
-        # FIXED: When extra_ids present, generate for entire selection
-        measures_to_generate = set()
-
-        if start_measure is not None and end_measure is not None:
-            if extra_ids:
-                # Generate for entire selection (handles selected multi-measure items)
-                measures_to_generate = set(range(start_measure, end_measure + 1))
-                if DEBUG:
-                    print(f"  Extra_ids present - generating for selection: {sorted(measures_to_generate)}")
-            else:
-                # Fallback: check for empty (shouldn't happen)
-                selection_range = range(start_measure, end_measure + 1)
-                for measure_idx in selection_range:
-                    is_empty = True
-                    for track in S.tracks:
-                        if measure_idx < len(track.tracks_by_measure):
-                            measure_track = track.tracks_by_measure[measure_idx]
-                            if hasattr(measure_track, 'note_ons') and measure_track.note_ons:
-                                is_empty = False
-                                break
-                    if is_empty:
-                        measures_to_generate.add(measure_idx)
-
-        if DEBUG:
-            print(f"  Measures to generate: {sorted(measures_to_generate)}")
+        # Detect which measures need generation using S structure
+        measures_to_generate = detect_measures_to_generate(
+            S, start_measure, end_measure, bool(extra_ids), debug=DEBUG
+        )
         
-        # Create temporary MIDI file from S
-
+        if DEBUG:
+            print(f"  Selection bounds: measures {start_measure}-{end_measure}")
+            print(f"  Detected measures to generate: {sorted(measures_to_generate) if measures_to_generate else 'none'}")
+        
         # If we have extra_ids but found no empty measures,
         # this means selected non-empty items need replacement
         # Generate anyway - REAPER will map correctly via extra_id
@@ -597,7 +620,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if not midi_results or len(midi_results) == 0:
             if DEBUG:
                 print("  MidiGPT returned empty result")
-            return f";M:{target_measure_from_ca};<extra_id_{actual_extra_id}>N:60;d:240;w:240"
+            target_measure = min(measures_to_generate) if measures_to_generate else 0
+            return f";M:{target_measure};<extra_id_{actual_extra_id}>N:60;d:240;w:240"
         
         # Parse first result
         midi_result_str = midi_results[0]
@@ -649,11 +673,11 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             import traceback
             traceback.print_exc()
         
-        target_measure = 0
-        if 'target_measure_from_ca' in locals():
-            target_measure = target_measure_from_ca
+        # Use first generated measure or 0 as fallback
+        target_measure = min(measures_to_generate) if 'measures_to_generate' in locals() and measures_to_generate else 0
+        fallback_extra_id = actual_extra_id if 'actual_extra_id' in locals() else 0
         
-        return f";M:{target_measure};<extra_id_{actual_extra_id if 'actual_extra_id' in locals() else 0}>N:60;d:240;w:240"
+        return f";M:{target_measure};<extra_id_{fallback_extra_id}>N:60;d:240;w:240"
 
 
 def start_server():
