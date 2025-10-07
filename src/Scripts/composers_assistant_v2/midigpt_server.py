@@ -141,23 +141,6 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
     return measures_to_generate, extra_id_to_measure
 
 
-def apply_track_options_to_status(status_json, track_options_by_idx, global_options):
-    """Apply track-specific options from REAPER FX to MidiGPT status."""
-    for track_idx, track_config in enumerate(status_json.get('tracks', [])):
-        if track_idx in track_options_by_idx:
-            options = track_options_by_idx[track_idx]
-            track_config['temperature'] = options.track_temperature if options.track_temperature >= 0 else global_options.temperature
-            track_config['instrument'] = options.instrument
-            track_config['density'] = options.density
-            track_config['track_type'] = options.track_type
-            track_config['min_polyphony_q'] = options.min_polyphony_q
-            track_config['max_polyphony_q'] = options.max_polyphony_q
-            track_config['polyphony_hard_limit'] = options.polyphony_hard_limit if options.polyphony_hard_limit > 0 else global_options.polyphony_hard_limit
-        else:
-            track_config['temperature'] = global_options.temperature
-            track_config['polyphony_hard_limit'] = global_options.polyphony_hard_limit
-
-
 def get_loudness_level(avg_velocity):
     """Convert velocity to loudness level (0-7)."""
     DYNAMICS_SLICER = [64.4, 76.67, 81.9, 89.37, 95.9, 100.5, 109.9]
@@ -355,26 +338,47 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
 
 
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
-                   has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
-    """Main function called by REAPER via XMLRPC"""
+                   has_fully_masked_inst=False, options_dict=None, start_measure=None, end_measure=None):
+    """
+    Main function called by REAPER via XMLRPC
+    Now receives full options_dict with all global parameters
+    """
     global LAST_CALL, LAST_OUTPUTS
     
-    temperature = max(0.5, min(2.0, temperature))
+    # Use options from dict if provided, otherwise defaults
+    if options_dict is None:
+        options_dict = {}
+    
+    temperature = options_dict.get('temperature', 1.0)
+    tracks_per_step = options_dict.get('tracks_per_step', 1)
+    bars_per_step = options_dict.get('bars_per_step', 1)
+    model_dim = options_dict.get('model_dim', 4)
+    percentage = options_dict.get('percentage', 100)
+    max_steps = options_dict.get('max_steps', 200)
+    batch_size = options_dict.get('batch_size', 1)
+    shuffle = options_dict.get('shuffle', True)
+    sampling_seed = options_dict.get('sampling_seed', -1)
+    mask_top_k = options_dict.get('mask_top_k', 0)
+    polyphony_hard_limit = options_dict.get('polyphony_hard_limit', 6)
+    
+    # Validate temperature
+    if temperature < 0.5:
+        temperature = 0.5
+    elif temperature > 2.0:
+        temperature = 2.0
     
     if DEBUG:
         print(f"\n{'='*60}")
         print('MIDIGPT CALL_NN_INFILL')
-        print(f"  Input: {len(s)} chars")
         print(f"  Temperature: {temperature}")
-        if start_measure is not None and end_measure is not None:
-            print(f"  Selection: measures {start_measure}-{end_measure}")
+        print(f"  Model dim: {model_dim}")
+        print(f"  Max steps: {max_steps}")
+        print(f"  Shuffle: {shuffle}")
     
     try:
         if not MIDIGPT_AVAILABLE:
             return ";M:0;B:5;L:96;<extra_id_0>N:60;d:240;w:240"
         
-        
-        global_options = create_default_options(temperature)
         track_options = {}
         
         s_normalized = re.sub(r'<extra_id_\d+>', '<extra_id_0>', s)
@@ -427,7 +431,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         for track_idx in range(num_tracks):
             track_config = {
                 'track_id': track_idx,
-                'temperature': global_options.temperature,
+                'temperature': temperature,
                 'instrument': 'acoustic_grand_piano',
                 'density': 10,
                 'track_type': 'STANDARD_TRACK',
@@ -436,27 +440,24 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                 'min_polyphony_q': 'POLYPHONY_ANY',
                 'max_polyphony_q': 'POLYPHONY_ANY',
                 'autoregressive': False,
-                'polyphony_hard_limit': global_options.polyphony_hard_limit
+                'polyphony_hard_limit': polyphony_hard_limit
             }
             status['tracks'].append(track_config)
         
-        if track_options:
-            apply_track_options_to_status(status, track_options, global_options)
-        
         params = {
-            'tracks_per_step': global_options.tracks_per_step,
-            'bars_per_step': global_options.bars_per_step,
-            'model_dim': global_options.model_dim,
-            'percentage': global_options.percentage,
-            'batch_size': global_options.batch_size,
-            'temperature': global_options.temperature,
-            'max_steps': global_options.max_steps,
-            'polyphony_hard_limit': global_options.polyphony_hard_limit,
-            'shuffle': global_options.shuffle,
+            'tracks_per_step': tracks_per_step,
+            'bars_per_step': bars_per_step,
+            'model_dim': model_dim,
+            'percentage': percentage,
+            'batch_size': batch_size,
+            'temperature': temperature,
+            'max_steps': max_steps,
+            'polyphony_hard_limit': polyphony_hard_limit,
+            'shuffle': shuffle,
             'verbose': False,
             'ckpt': CHECKPOINT_PATH,
-            'sampling_seed': global_options.sampling_seed,
-            'mask_top_k': global_options.mask_top_k
+            'sampling_seed': sampling_seed,
+            'mask_top_k': mask_top_k
         }
         
         if DEBUG:

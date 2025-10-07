@@ -1,6 +1,16 @@
 # rpr_midigpt_functions.py - Complete with parameter reading AND call_nn_infill
 import preprocessing_functions as pre
 
+import mytrackviewstuff as mt
+import mymidistuff as mm
+import myfunctions as mf
+import midisong as ms
+import nn_str_functions as nns
+import constants as cs
+import encoding_functions as enc
+import tokenizer_functions as tok
+import preprocessing_functions as pre
+import midi_inst_to_name
 
 def test_function():
     return "midigpt functions loaded"
@@ -213,104 +223,74 @@ class MidigptTrackOptionsObj:
         self.polyphony_hard_limit = -1
 
 
-def _locate_midigpt_global_options_FX_loc():
-    """Find the MidiGPT Global Options FX on master track"""
-    from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetParam
-    
+def _locate_infiller_global_options_FX_loc() -> int:
+    """-1 means not found (or not enabled). Look on monitor FX. Get the first enabled instance."""
+    from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetEnabled, RPR_TrackFX_GetParam
     tr = RPR_GetMasterTrack(-1)
-    n_fx = 100
-    
-    for i in range(n_fx):
-        # Check slider1 (parameter index 1) for the magic ID
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, i, 1, 0, 0)
-        if is_approx(val, 54964318):
-            return i
-    
+    n_fx = 100  # search up to 100 FX
+    for i in range(0x1000000, 0x1000000 + n_fx):
+        if RPR_TrackFX_GetEnabled(tr, i):
+            v = RPR_TrackFX_GetParam(tr, i, 0, 0, 0)[0]
+            if mf.is_approx(v, 54964318):
+                return i
     return -1
 
 
 def get_global_options():
-    """Read global options from REAPER FX"""
     from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetParam
-    
     options = MidigptGlobalOptionsObj()
-    fx_loc = _locate_midigpt_global_options_FX_loc()
-    
-    if fx_loc == -1:
-        print("MidiGPT Global Options FX not found, using defaults")
-        return options
-    
-    print(f"Found MidiGPT Global Options FX at location {fx_loc}")
-    
-    tr = RPR_GetMasterTrack(-1)
-    
-    # Read parameters - using proper tuple unpacking like CA does
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 10, 0, 0)
-    options.temperature = val
-    print(f"Read temperature from parameter 10: {val}")
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 11, 0, 0)
-    options.tracks_per_step = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 12, 0, 0)
-    options.bars_per_step = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 13, 0, 0)
-    options.model_dim = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 14, 0, 0)
-    options.percentage = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 15, 0, 0)
-    options.max_steps = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 16, 0, 0)
-    options.batch_size = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 17, 0, 0)
-    options.shuffle = bool(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 18, 0, 0)
-    options.sampling_seed = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 19, 0, 0)
-    options.mask_top_k = int(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 20, 0, 0)
-    options.polyphony_hard_limit = int(val)
-    
-    # CA-compatible options
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 30, 0, 0)
-    rhy_cond_val = int(val)
-    options.do_rhythm_conditioning = rhy_cond_val > 0
-    if rhy_cond_val == 1:
-        options.rhythm_conditioning_type = '1d_flattening'
-    elif rhy_cond_val == 2:
-        options.rhythm_conditioning_type = 'n_pitch_classes_and_n_notes'
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 31, 0, 0)
-    note_range_val = int(val)
-    options.do_note_range_conditioning = note_range_val > 0
-    if note_range_val == 1:
-        options.note_range_conditioning_type = 'loose'
-    elif note_range_val == 2:
-        options.note_range_conditioning_type = 'strict'
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 32, 0, 0)
-    options.enc_no_repeat_ngram_size = int(val)
-    
-    # UI flags
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 40, 0, 0)
-    options.display_track_to_MIDI_inst = bool(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 41, 0, 0)
-    options.generated_notes_are_selected = bool(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 42, 0, 0)
-    options.display_warnings = bool(val)
-    
-    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 43, 0, 0)
-    options.verbose = bool(val)
+    fx_loc = _locate_infiller_global_options_FX_loc()
+    loc_offset = 1
+    if fx_loc != -1:
+        tr = RPR_GetMasterTrack(-1)
+
+        # Read parameters - using proper tuple unpacking like CA does
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 0 + loc_offset, 0, 0)
+        options.temperature = val
+        print(f"Read temperature from parameter 10: {val}")
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 1 + loc_offset, 0, 0)
+        options.tracks_per_step = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 2 + loc_offset, 0, 0)
+        options.bars_per_step = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 3 + loc_offset, 0, 0)
+        options.model_dim = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 4 + loc_offset, 0, 0)
+        options.percentage = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 5 + loc_offset, 0, 0)
+        options.max_steps = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 6 + loc_offset, 0, 0)
+        options.batch_size = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 7 + loc_offset, 0, 0)
+        options.shuffle = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 8 + loc_offset, 0, 0)
+        options.sampling_seed = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 9 + loc_offset, 0, 0)
+        options.mask_top_k = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 10 + loc_offset, 0, 0)
+        options.polyphony_hard_limit = int(val)
+        
+        # UI flags
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 11 + loc_offset, 0, 0)
+        options.display_track_to_MIDI_inst = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 12 + loc_offset, 0, 0)
+        options.generated_notes_are_selected = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 13 + loc_offset, 0, 0)
+        options.display_warnings = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 14 + loc_offset, 0, 0)
+        options.verbose = bool(val)
     
     return options
 
@@ -327,7 +307,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     try:
         proxy = ServerProxy('http://127.0.0.1:3456')
         res = proxy.call_nn_infill(s, pre.encode_midisongbymeasure_to_save_dict(S), use_sampling, min_length, 
-                                   enc_no_repeat_ngram_size, has_fully_masked_inst, temperature,
+                                   enc_no_repeat_ngram_size, has_fully_masked_inst, get_global_options(),
                                    start_measure, end_measure)
         return res
     except xmlrpc.client.Fault as e:
