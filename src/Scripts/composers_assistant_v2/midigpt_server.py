@@ -373,24 +373,15 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         if not MIDIGPT_AVAILABLE:
             return ";M:0;B:5;L:96;<extra_id_0>N:60;d:240;w:240"
         
-        if PARAM_FUNCTIONS_AVAILABLE:
-            try:
-                global_options = midigpt_fn.get_midigpt_global_options()
-                track_options = midigpt_fn.get_midigpt_track_options_by_track_idx()
-            except Exception as e:
-                if DEBUG:
-                    print(f"  Using defaults: {e}")
-                global_options = create_default_options(temperature)
-                track_options = {}
-        else:
-            global_options = create_default_options(temperature)
-            track_options = {}
+        
+        global_options = create_default_options(temperature)
+        track_options = {}
         
         s_normalized = re.sub(r'<extra_id_\d+>', '<extra_id_0>', s)
-        if s_normalized == LAST_CALL or s_normalized in LAST_OUTPUTS:
-            if DEBUG:
-                print("  Using cached result")
-            return ";M:0;B:5;L:96;<extra_id_0>N:60;d:240;w:240"
+        #if s_normalized == LAST_CALL or s_normalized in LAST_OUTPUTS:
+        #    if DEBUG:
+        #        print("  Using cached result")
+        #    return ";M:0;B:5;L:96;<extra_id_0>N:60;d:240;w:240"
         
         extra_ids = [int(m) for m in re.findall(r'<extra_id_(\d+)>', s)]
         actual_extra_id = extra_ids[0] if extra_ids else 0

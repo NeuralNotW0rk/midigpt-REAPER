@@ -213,115 +213,106 @@ class MidigptTrackOptionsObj:
         self.polyphony_hard_limit = -1
 
 
-def get_midigpt_global_options():
-    """Read global options from REAPER FX"""
+def _locate_midigpt_global_options_FX_loc():
+    """Find the MidiGPT Global Options FX on master track"""
     from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetParam
     
-    print("get_midigpt_global_options called")
-    
-    options = MidigptGlobalOptionsObj()
-    
-    # Find the MidiGPT Global Options FX on master track
     tr = RPR_GetMasterTrack(-1)
     n_fx = 100
-    fx_idx = -1
     
-    for i in range(0x1000000, 0x1000000 + n_fx):
-        v = RPR_TrackFX_GetParam(tr, i, 0, 0, 0)[0]
-        if is_approx(v, 54964318):
-            fx_idx = i
-            break
+    for i in range(n_fx):
+        # Check slider1 (parameter index 1) for the magic ID
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, i, 1, 0, 0)
+        if is_approx(val, 54964318):
+            return i
     
-    if fx_idx == -1:
-        print("MidiGPT Global Options FX not found, using defaults")
-        return options
-    
-    # Read parameters
-    options.temperature = RPR_TrackFX_GetParam(tr, fx_idx, 10, 0, 0)[0]
-    options.tracks_per_step = int(RPR_TrackFX_GetParam(tr, fx_idx, 11, 0, 0)[0])
-    options.bars_per_step = int(RPR_TrackFX_GetParam(tr, fx_idx, 12, 0, 0)[0])
-    options.model_dim = int(RPR_TrackFX_GetParam(tr, fx_idx, 13, 0, 0)[0])
-    options.percentage = int(RPR_TrackFX_GetParam(tr, fx_idx, 14, 0, 0)[0])
-    options.max_steps = int(RPR_TrackFX_GetParam(tr, fx_idx, 15, 0, 0)[0])
-    options.batch_size = int(RPR_TrackFX_GetParam(tr, fx_idx, 16, 0, 0)[0])
-    options.shuffle = bool(RPR_TrackFX_GetParam(tr, fx_idx, 17, 0, 0)[0])
-    options.sampling_seed = int(RPR_TrackFX_GetParam(tr, fx_idx, 18, 0, 0)[0])
-    options.mask_top_k = int(RPR_TrackFX_GetParam(tr, fx_idx, 19, 0, 0)[0])
-    options.polyphony_hard_limit = int(RPR_TrackFX_GetParam(tr, fx_idx, 20, 0, 0)[0])
-    
-    # CA-compatible options
-    rhy_cond_val = int(RPR_TrackFX_GetParam(tr, fx_idx, 30, 0, 0)[0])
-    options.do_rhythm_conditioning = rhy_cond_val > 0
-    options.rhythm_conditioning_type = ['none', 'rhythm', 'rhythm_pitch'][rhy_cond_val]
-    
-    note_range_val = int(RPR_TrackFX_GetParam(tr, fx_idx, 31, 0, 0)[0])
-    options.do_note_range_conditioning = note_range_val > 0
-    options.note_range_conditioning_type = ['none', 'loose', 'strict'][note_range_val]
-    
-    options.enc_no_repeat_ngram_size = int(RPR_TrackFX_GetParam(tr, fx_idx, 32, 0, 0)[0])
-    
-    # UI flags
-    options.display_track_to_MIDI_inst = bool(RPR_TrackFX_GetParam(tr, fx_idx, 40, 0, 0)[0])
-    options.generated_notes_are_selected = bool(RPR_TrackFX_GetParam(tr, fx_idx, 41, 0, 0)[0])
-    options.display_warnings = bool(RPR_TrackFX_GetParam(tr, fx_idx, 42, 0, 0)[0])
-    options.verbose = bool(RPR_TrackFX_GetParam(tr, fx_idx, 43, 0, 0)[0])
-    
-    return options
+    return -1
 
 
 def get_global_options():
-    """CA-compatible function name that REAPER script expects"""
-    print("get_global_options called (midigpt version)")
-    return get_midigpt_global_options()
-
-
-def get_midigpt_track_options_by_track_idx():
-    """Read track-specific options from REAPER FX"""
-    from reaper_python import RPR_GetTrack, RPR_CountTracks, RPR_TrackFX_GetParam
+    """Read global options from REAPER FX"""
+    from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetParam
     
-    print("get_midigpt_track_options_by_track_idx called")
+    options = MidigptGlobalOptionsObj()
+    fx_loc = _locate_midigpt_global_options_FX_loc()
     
-    track_options = {}
-    num_tracks = RPR_CountTracks(0)
+    if fx_loc == -1:
+        print("MidiGPT Global Options FX not found, using defaults")
+        return options
     
-    for track_idx in range(num_tracks):
-        track = RPR_GetTrack(0, track_idx)
-        
-        # Find MidiGPT Track Options FX on this track
-        fx_idx = -1
-        for i in range(100):
-            v = RPR_TrackFX_GetParam(track, i, 0, 0, 0)[0]
-            if is_approx(v, 349583025):
-                fx_idx = i
-                break
-        
-        if fx_idx == -1:
-            continue
-        
-        options = MidigptTrackOptionsObj()
-        
-        # Read parameters
-        options.track_temperature = RPR_TrackFX_GetParam(track, fx_idx, 10, 0, 0)[0]
-        
-        instrument_idx = int(RPR_TrackFX_GetParam(track, fx_idx, 20, 0, 0)[0])
-        options.instrument = INSTRUMENT_MAP.get(instrument_idx, 'acoustic_grand_piano')
-        
-        options.density = int(RPR_TrackFX_GetParam(track, fx_idx, 30, 0, 0)[0])
-        
-        track_type_idx = int(RPR_TrackFX_GetParam(track, fx_idx, 40, 0, 0)[0])
-        options.track_type = TRACK_TYPE_MAP.get(track_type_idx, 'STANDARD_TRACK')
-        
-        min_poly_idx = int(RPR_TrackFX_GetParam(track, fx_idx, 50, 0, 0)[0])
-        options.min_polyphony_q = POLYPHONY_MAP.get(min_poly_idx, 'POLYPHONY_ANY')
-        
-        max_poly_idx = int(RPR_TrackFX_GetParam(track, fx_idx, 51, 0, 0)[0])
-        options.max_polyphony_q = POLYPHONY_MAP.get(max_poly_idx, 'POLYPHONY_ANY')
-        
-        options.polyphony_hard_limit = int(RPR_TrackFX_GetParam(track, fx_idx, 52, 0, 0)[0])
-        
-        track_options[track_idx] = options
+    print(f"Found MidiGPT Global Options FX at location {fx_loc}")
     
-    return track_options
+    tr = RPR_GetMasterTrack(-1)
+    
+    # Read parameters - using proper tuple unpacking like CA does
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 10, 0, 0)
+    options.temperature = val
+    print(f"Read temperature from parameter 10: {val}")
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 11, 0, 0)
+    options.tracks_per_step = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 12, 0, 0)
+    options.bars_per_step = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 13, 0, 0)
+    options.model_dim = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 14, 0, 0)
+    options.percentage = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 15, 0, 0)
+    options.max_steps = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 16, 0, 0)
+    options.batch_size = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 17, 0, 0)
+    options.shuffle = bool(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 18, 0, 0)
+    options.sampling_seed = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 19, 0, 0)
+    options.mask_top_k = int(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 20, 0, 0)
+    options.polyphony_hard_limit = int(val)
+    
+    # CA-compatible options
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 30, 0, 0)
+    rhy_cond_val = int(val)
+    options.do_rhythm_conditioning = rhy_cond_val > 0
+    if rhy_cond_val == 1:
+        options.rhythm_conditioning_type = '1d_flattening'
+    elif rhy_cond_val == 2:
+        options.rhythm_conditioning_type = 'n_pitch_classes_and_n_notes'
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 31, 0, 0)
+    note_range_val = int(val)
+    options.do_note_range_conditioning = note_range_val > 0
+    if note_range_val == 1:
+        options.note_range_conditioning_type = 'loose'
+    elif note_range_val == 2:
+        options.note_range_conditioning_type = 'strict'
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 32, 0, 0)
+    options.enc_no_repeat_ngram_size = int(val)
+    
+    # UI flags
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 40, 0, 0)
+    options.display_track_to_MIDI_inst = bool(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 41, 0, 0)
+    options.generated_notes_are_selected = bool(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 42, 0, 0)
+    options.display_warnings = bool(val)
+    
+    val, _, _, _, _, _ = RPR_TrackFX_GetParam(tr, fx_loc, 43, 0, 0)
+    options.verbose = bool(val)
+    
+    return options
 
 
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
