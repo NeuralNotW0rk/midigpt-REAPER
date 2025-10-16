@@ -1,4 +1,4 @@
-# rpr_midigpt_functions.py - Complete with parameter reading AND call_nn_infill
+# rpr_mmm_functions.py - Complete with parameter reading AND call_nn_infill
 import preprocessing_functions as pre
 
 import mytrackviewstuff as mt
@@ -13,10 +13,10 @@ import preprocessing_functions as pre
 import midi_inst_to_name
 
 def test_function():
-    return "midigpt functions loaded"
+    return "mmm functions loaded"
 
 
-# Mapping from slider values to MidiGPT polyphony enum strings
+# Mapping from slider values to MMM polyphony enum strings
 POLYPHONY_MAP = {
     0: 'POLYPHONY_ANY',
     1: 'POLYPHONY_0_1',
@@ -178,7 +178,7 @@ def is_approx(a, b, tolerance=0.001):
     return abs(a - b) < tolerance
 
 
-class MidigptGlobalOptionsObj:
+class MMMGlobalOptionsObj:
     def __init__(self):
         # Core generation parameters
         self.temperature = 1.0
@@ -207,7 +207,7 @@ class MidigptGlobalOptionsObj:
         self.enc_no_repeat_ngram_size = 0
 
 
-class MidigptTrackOptionsObj:
+class MMMTrackOptionsObj:
     def __init__(self):
         # Temperature override
         self.track_temperature = -1
@@ -238,7 +238,7 @@ def _locate_infiller_global_options_FX_loc() -> int:
 
 def get_global_options():
     from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetParam
-    options = MidigptGlobalOptionsObj()
+    options = MMMGlobalOptionsObj()
     fx_loc = _locate_infiller_global_options_FX_loc()
     loc_offset = 1
     if fx_loc != -1:
@@ -298,7 +298,7 @@ def get_global_options():
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
                    has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
     """
-    Call the MidiGPT server via XML-RPC
+    Call the MMM server via XML-RPC
     Includes start_measure and end_measure for proper selection bounds
     """
     from xmlrpc.client import ServerProxy
@@ -311,23 +311,16 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                                    start_measure, end_measure)
         return res
     except xmlrpc.client.Fault as e:
-        print('Exception raised by MidiGPT server:')
+        print('Exception raised by MMM server:')
         print(str(e))
         raise
     except Exception as e:
-        print('MidiGPT server connection failed. Make sure midigpt_server.py is running on port 3456.')
+        print('MMM server connection failed. Make sure mmm_server.py is running on port 3456.')
         print(f'Error: {e}')
         raise
 
 
-def build_midigpt_generation_request(global_options, track_options, project_data):
+def build_mmm_generation_request(global_options, track_options, project_data):
     """Not used in current unified architecture - using direct server"""
-    print("No need to build midigpt request - using direct server")
+    print("No need to build MMM request - using direct server")
     return None
-
-
-def call_midigpt_via_proxy(nn_input, options):
-    """Legacy proxy method - not used in current unified architecture"""
-    print("call_midigpt_via_proxy called but not implemented")
-    print("Using direct call_nn_infill instead")
-    return "<extra_id_0>N:60;d:240;w:240;N:64;d:240;w:240;"

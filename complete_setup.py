@@ -13,7 +13,8 @@ from pathlib import Path
 
 VENV_NAME = "venv"
 PYTHON_MIN_VERSION = (3, 9)
-MIDIGPT_REPO = "https://github.com/Metacreation-Lab/MIDI-GPT.git"
+MMM_REPO = "https://github.com/DaoTwenty/MMM.git"
+MMM_BRANCH = "cpp_port"
 
 def run_command(cmd, capture_output=False, cwd=None):
     """Run command with proper error handling and shell escaping"""
@@ -151,53 +152,44 @@ def install_project_requirements():
         print(f"Installing {lib}...")
         run_command([pip_cmd, "install", lib])
 
-def clone_midi_gpt():
-    """Clone MIDI-GPT repository from the python-3-9-refactor branch"""
-    if Path("MIDI-GPT").exists():
-        print("MIDI-GPT repository already exists")
+def clone_mmm():
+    """Clone MMM repository from the python-3-9-refactor branch"""
+    if Path("MMM").exists():
+        print("MMM repository already exists")
         # Check if we're on the correct branch
         try:
-            result = run_command("git branch --show-current", capture_output=True, cwd="MIDI-GPT")
+            result = run_command("git branch --show-current", capture_output=True, cwd="MMM")
             current_branch = result.stdout.strip()
-            if current_branch != "python-3-9-refactor":
-                print(f"Switching from {current_branch} to python-3-9-refactor branch...")
-                run_command("git checkout python-3-9-refactor", cwd="MIDI-GPT")
+            if current_branch != MMM_BRANCH:
+                print(f"Switching from {current_branch} to {MMM_BRANCH} branch...")
+                run_command(f"git checkout {MMM_BRANCH}", cwd="MMM")
             else:
-                print("Already on python-3-9-refactor branch")
+                print(f"Already on {MMM_BRANCH} branch")
         except:
             print("Could not determine current branch, proceeding with existing repo")
         return
     
-    print("Cloning MIDI-GPT repository (python-3-9-refactor branch)...")
-    run_command(f"git clone -b python-3-9-refactor {MIDIGPT_REPO}")
-    print("MIDI-GPT repository cloned from python-3-9-refactor branch")
+    print(f"Cloning MMM repository ({MMM_BRANCH} branch)...")
+    run_command(f"git clone -b {MMM_BRANCH} {MMM_REPO}")
+    print(f"MMM repository cloned from {MMM_BRANCH} branch")
 
-def build_midi_gpt():
-    """Build and install MIDI-GPT using the --install flag"""
-    print("Building and installing MIDI-GPT...")
+def build_mmm():
+    """Build and install MMM using the --install flag"""
+    print("Building and installing MMM...")
     
-    if not Path("MIDI-GPT").exists():
-        print("MIDI-GPT directory not found")
+    if not Path("MMM").exists():
+        print("MMM directory not found")
         return False
     
-    python_cmd = str(get_python_command())
-    
     try:
-        # Use the new --install flag for direct installation to venv
-        if platform.system() == "Darwin":  # macOS
-            run_command([python_cmd, "setup_midigpt.py", "--install", "--mac-os", "--test"], 
-                       cwd="MIDI-GPT")
-        else:
-            run_command([python_cmd, "setup_midigpt.py", "--install", "--test"], 
-                       cwd="MIDI-GPT")
+        python_cmd = str(get_python_command())
+        run_command(f"{python_cmd} -m pip install .", cwd="MMM")
         
-        print("MIDI-GPT built and installed successfully")
+        print("MMM built and installed successfully")
         return True
         
     except Exception as e:
-        print(f"MIDI-GPT build failed: {e}")
-        print("You may need to complete this manually:")
-        print(f"  cd MIDI-GPT && {python_cmd} setup_midigpt.py --install --test")
+        print(f"MMM install failed: {e}")
         return False
 
 def setup_reaper_integration():
@@ -271,20 +263,13 @@ def verify_installation():
         except:
             print(f"  ✗ {name}")
     
-    # Test MIDI-GPT import
+    # Test MMM import
     try:
-        # With --install flag, midigpt should be directly importable
-        run_command([python_cmd, "-c", "import midigpt; print('MIDI-GPT: Ready')"], 
+        run_command([python_cmd, "-c", "import mmm; print('MMM: Ready')"], 
                    capture_output=True)
-        print("  ✓ MIDI-GPT import (installed)")
+        print("  ✓ MMM import (installed)")
     except:
-        # Fallback to path-based import
-        try:
-            midi_test_cmd = 'import sys; sys.path.append("MIDI-GPT/python_lib"); import midigpt; print("MIDI-GPT: Ready")'
-            run_command([python_cmd, "-c", midi_test_cmd], capture_output=True)
-            print("  ✓ MIDI-GPT import (path-based)")
-        except:
-            print("  ✗ MIDI-GPT import - requires manual completion")
+        print("  ✗ MMM import - requires manual completion")
 
 def print_completion_message():
     """Print completion message and next steps"""
@@ -300,12 +285,6 @@ def print_completion_message():
     print("1. Start the server: python start_server.py start")
     print("2. Open REAPER and load Composer's Assistant scripts")
     print("3. Begin composing with AI assistance!")
-    
-    print(f"\nFor manual MIDI-GPT completion if needed:")
-    print(f"  {activate_cmd}")
-    print(f"  cd MIDI-GPT && python setup_midigpt.py --install --test")
-    if platform.system() == "Darwin":
-        print(f"  (on macOS: python setup_midigpt.py --install --mac-os --test)")
     
     print(f"\nTo verify your virtual environment is working:")
     print(f"  {activate_cmd}")
@@ -326,9 +305,9 @@ def main():
         install_core_dependencies(has_cuda)
         install_project_requirements()
         
-        # MIDI-GPT integration
-        clone_midi_gpt()
-        midi_success = build_midi_gpt()
+        # MMM integration
+        clone_mmm()
+        midi_success = build_mmm()
         
         # REAPER integration
         setup_reaper_integration()
@@ -343,7 +322,7 @@ def main():
         print_completion_message()
         
         if not midi_success:
-            print("\nNote: MIDI-GPT build may require manual completion")
+            print("\nNote: MMM build may require manual completion")
             sys.exit(1)
             
     except KeyboardInterrupt:

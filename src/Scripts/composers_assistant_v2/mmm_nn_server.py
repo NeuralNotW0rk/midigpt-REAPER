@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MidiGPT Server - Fixed measure mapping and CA format generation
+MMM Server - Fixed measure mapping and CA format generation
 """
 
 import os
@@ -10,26 +10,22 @@ import tempfile
 import json
 import re
 
-midi_gpt_path = os.path.join(os.path.dirname(__file__), "../../../MIDI-GPT/python_lib")
-if os.path.exists(midi_gpt_path):
-    sys.path.insert(0, os.path.abspath(midi_gpt_path))
-
 ca_path = os.path.join(os.path.dirname(__file__), "src/Scripts/composers_assistant_v2")
 if os.path.exists(ca_path):
     sys.path.insert(0, os.path.abspath(ca_path))
 
 try:
-    import midigpt
+    import mmm
     import preprocessing_functions as pre
     import mido
-    MIDIGPT_AVAILABLE = True
-    print("MidiGPT library loaded successfully")
+    MMM_AVAILABLE = True
+    print("MMM library loaded successfully")
 except ImportError as e:
-    MIDIGPT_AVAILABLE = False
-    print(f"MidiGPT not available: {e}")
+    MMM_AVAILABLE = False
+    print(f"MMM not available: {e}")
 
 try:
-    import rpr_midigpt_functions as midigpt_fn
+    import Scripts.composers_assistant_v2.rpr_mmm_functions as mmm_fn
     PARAM_FUNCTIONS_AVAILABLE = True
     print("Parameter reading functions loaded")
 except ImportError as e:
@@ -39,18 +35,7 @@ except ImportError as e:
 DEBUG = True
 PORT = 3456
 
-def find_checkpoint():
-    possible_paths = [
-        "MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-        "../../../MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt",
-        os.path.expanduser("~/Documents/GitHub/midigpt-REAPER/MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt")
-    ]
-    for path in possible_paths:
-        if os.path.exists(path):
-            return os.path.abspath(path)
-    return possible_paths[0]
-
-CHECKPOINT_PATH = find_checkpoint()
+CHECKPOINT_PATH = "" # TODO
 LAST_CALL = None
 LAST_OUTPUTS = set()
 
@@ -243,10 +228,10 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
         print(f"  AI measures with notes: {ai_measures}")
     
     # MAP AI MEASURES TO PROJECT MEASURES
-    # MidiGPT returns full context, not just generated measures
+    # MMM returns full context, not just generated measures
     # AI measures map to project measures by POSITION, not sequentially
     # E.g., if we're generating project measure 3 in an 8-measure project:
-    #   - MidiGPT gets measures 0-3 as context
+    #   - MMM gets measures 0-3 as context
     #   - Returns AI measures 0-3 (full context)
     #   - AI measure 3 contains the NEW content for project measure 3
     #   - AI measures 0-2 are unchanged context
@@ -254,7 +239,7 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
     ai_measures_sorted = sorted(set(n['ai_measure'] for n in all_notes))
     
     # Map AI measures to project measures by position
-    # Assume MidiGPT returns measures starting from start_measure
+    # Assume MMM returns measures starting from start_measure
     # This assumes the S structure we sent had measures [start_measure..end_measure]
     measure_map = {}
     for ai_m in ai_measures_sorted:
@@ -369,14 +354,14 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     
     if DEBUG:
         print(f"\n{'='*60}")
-        print('MIDIGPT CALL_NN_INFILL')
+        print('MMM CALL_NN_INFILL')
         print(f"  Temperature: {temperature}")
         print(f"  Model dim: {model_dim}")
         print(f"  Max steps: {max_steps}")
         print(f"  Shuffle: {shuffle}")
     
     try:
-        if not MIDIGPT_AVAILABLE:
+        if not MMM_AVAILABLE:
             return ";M:0;B:5;L:96;<extra_id_0>N:60;d:240;w:240"
         
         track_options = {}
@@ -421,7 +406,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                     input_time_sig = (msg.numerator, msg.denominator)
                     break
         
-        encoder = midigpt.ExpressiveEncoder()
+        encoder = mmm.ExpressiveEncoder()
         piece_json_str = encoder.midi_to_json(temp_midi_path)
         piece_json = json.loads(piece_json_str)
         
@@ -461,18 +446,18 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         }
         
         if DEBUG:
-            print(f"\n=== MIDIGPT GENERATION ===")
+            print(f"\n=== MMM GENERATION ===")
             print(f"  Tracks: {num_tracks}")
             print(f"  Generating measures: {sorted(measures_to_generate)}")
         
         status_str = json.dumps(status)
         params_str = json.dumps(params)
-        callbacks = midigpt.CallbackManager()
-        midi_results = midigpt.sample_multi_step(piece_json_str, status_str, params_str, 3, callbacks)
+        callbacks = mmm.CallbackManager()
+        midi_results = mmm.sample_multi_step(piece_json_str, status_str, params_str, 3, callbacks)
         
         if not midi_results:
             if DEBUG:
-                print("  No results from MidiGPT")
+                print("  No results from MMM")
             return f";M:0;B:5;L:96;<extra_id_{actual_extra_id}>N:60;d:240;w:240"
         
         result_json = midi_results[0]
@@ -539,10 +524,10 @@ def create_default_options(temp):
 
 def start_server():
     print("="*60)
-    print("MidiGPT Server - Fixed Mapping & CA Format")
+    print("MMM Server")
     print("="*60)
     print(f"Port: {PORT}")
-    print(f"MidiGPT: {MIDIGPT_AVAILABLE}")
+    print(f"MMM: {MMM_AVAILABLE}")
     print(f"Parameters: {PARAM_FUNCTIONS_AVAILABLE}")
     print("="*60)
     
