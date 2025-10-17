@@ -393,7 +393,6 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
-        temp_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_in.mid'
         S.dump(filename=temp_midi_path)
         
         input_midi = mido.MidiFile(temp_midi_path)
@@ -527,7 +526,6 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         # Save generated score to temporary MIDI file
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
-        result_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_out.mid'
         generated_score.save(result_midi_path)
         
         if DEBUG:
@@ -542,13 +540,11 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             input_time_signature=input_time_sig
         )
         
-        '''
         try:
             os.unlink(temp_midi_path)
             os.unlink(result_midi_path)
         except:
             pass
-        '''
         
         LAST_CALL = s_normalized
         LAST_OUTPUTS.add(ca_result)
