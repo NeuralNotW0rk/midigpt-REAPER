@@ -1,5 +1,5 @@
 import rpr_ca_functions as fn
-import rpr_midigpt_functions as midigpt_fn
+import rpr_mmm_functions as mmm_fn  # Changed from rpr_midigpt_functions
 from reaper_python import *
 import sys
 
@@ -30,19 +30,19 @@ patch_stdout_stderr_open()
 
 
 def go():
-    options = midigpt_fn.get_global_options()
+    options = mmm_fn.get_global_options()  # Changed from midigpt_fn
     
-    if fn.DEBUG or options.display_track_to_MIDI_inst:
+    if fn.DEBUG or options.disp_tr_to_midi_inst:  # Changed from display_track_to_MIDI_inst
         RPR_ClearConsole()
 
-    print("Using MidiGPT infill script")
+    print("Using MMM infill script")  # Changed message
 
     nn_input = fn.get_nn_input_from_project(mask_empty_midi_items=True, mask_selected_midi_items=True,
-                                            do_rhythmic_conditioning=options.do_rhythm_conditioning,
-                                            rhythmic_conditioning_type=options.rhythm_conditioning_type,
-                                            do_note_range_conditioning_by_measure=options.do_note_range_conditioning,
-                                            note_range_conditioning_type=options.note_range_conditioning_type,
-                                            display_track_to_MIDI_inst=options.display_track_to_MIDI_inst,
+                                            do_rhythmic_conditioning=options.rhy_cond > 0,  # Updated attribute name
+                                            rhythmic_conditioning_type=options.rhy_cond,  # Updated attribute name
+                                            do_note_range_conditioning_by_measure=options.do_note_range_cond > 0,  # Updated attribute name
+                                            note_range_conditioning_type=options.do_note_range_cond,  # Updated attribute name
+                                            display_track_to_MIDI_inst=options.disp_tr_to_midi_inst,  # Updated attribute name
                                             display_warnings=options.display_warnings)
     
     if nn_input.continue_:
@@ -53,26 +53,26 @@ def go():
         
         use_sampling = "None" if not fn.ALWAYS_TOP_P else True
         
-        # Use MidiGPT-specific wrapper function
-        nn_output = midigpt_fn.call_nn_infill(s=nn_input.nn_input_string,
-                                              S=nn_input.S,
-                                              use_sampling=use_sampling,
-                                              min_length=2,
-                                              enc_no_repeat_ngram_size=options.enc_no_repeat_ngram_size,
-                                              has_fully_masked_inst=nn_input.has_fully_masked_inst,
-                                              temperature=options.temperature,
-                                              start_measure=nn_input.start_measure,
-                                              end_measure=nn_input.end_measure)
+        # Use MMM-specific wrapper function
+        nn_output = mmm_fn.call_nn_infill(s=nn_input.nn_input_string,  # Changed from midigpt_fn
+                                          S=nn_input.S,
+                                          use_sampling=use_sampling,
+                                          min_length=2,
+                                          enc_no_repeat_ngram_size=options.enc_no_repeat_ngram_size,
+                                          has_fully_masked_inst=nn_input.has_fully_masked_inst,
+                                          temperature=options.temperature,
+                                          start_measure=nn_input.start_measure,
+                                          end_measure=nn_input.end_measure)
         
         if fn.DEBUG:
             print('got nn output: ', nn_output)
         
         fn.write_nn_output_to_project(nn_output=nn_output, nn_input_obj=nn_input,
-                                      notes_are_selected=options.generated_notes_are_selected,
-                                      use_vels_from_tr_measures=options.do_rhythm_conditioning)
+                                      notes_are_selected=options.gen_notes_are_selected,  # Updated attribute name
+                                      use_vels_from_tr_measures=options.rhy_cond > 0)  # Updated attribute name
 
 
 if __name__ == '__main__':
     go()
 
-RPR_Undo_OnStateChange('midigpt_Infill')
+RPR_Undo_OnStateChange('mmm_Infill')  # Changed from 'midigpt_Infill'
