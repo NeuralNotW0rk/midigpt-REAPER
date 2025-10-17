@@ -1,4 +1,3 @@
-.venv/
 src/Scripts/composers_assistant_v2/models_permuted_labels/
 
 *.pyc
