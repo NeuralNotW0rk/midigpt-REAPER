@@ -21,7 +21,7 @@ except ImportError as e:
 def get_global_options():
     """
     Read global MMM options from master track FX
-    Returns dict with all parameters
+    Returns object with all parameters matching MMM server expectations
     """
     class GlobalOptions:
         pass
@@ -41,7 +41,7 @@ def get_global_options():
     options.mask_top_k = 0
     options.polyphony_hard_limit = 6
     
-    # Additional CA-compatible options (not used by MMM but kept for compatibility)
+    # CA-compatible options (used by REAPER scripts but not by MMM)
     options.rhy_cond = 0
     options.do_note_range_cond = 0
     options.enc_no_repeat_ngram_size = 0
@@ -54,82 +54,100 @@ def get_global_options():
     try:
         master = RPR_GetMasterTrack(0)
         if master is None:
+            print("Warning: Could not get master track")
             return options
         
-        # Find MMM Global Options FX
-        fx_count = RPR_TrackFX_GetCount(master)
+        # Search Monitor FX chain (like CA does)
+        # Monitor FX uses special index: 0x1000000 + fx_index
         fx_loc = -1
+        n_fx = 100  # search up to 100 FX
         
-        for i in range(fx_count):
-            _, _, fx_name, _ = RPR_TrackFX_GetFXName(master, i, "", 256)
-            if 'mmm Global Options' in fx_name or 'midigpt Global Options' in fx_name:
-                fx_loc = i
-                break
+        print(f"Searching for MMM Global Options in Monitor FX chain")
+        for i in range(0x1000000, 0x1000000 + n_fx):
+            if RPR_TrackFX_GetEnabled(master, i):
+                # Check if this is our FX by reading the jsfx_id parameter
+                val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, i, 0, 0, 0)
+                print(f"  Monitor FX {i - 0x1000000}: jsfx_id={val}")
+                # MMM/MidiGPT Global Options has jsfx_id = 54964318
+                if abs(val - 54964318) < 0.5:
+                    fx_loc = i
+                    print(f"  --> Found MMM Global Options at monitor FX index {i - 0x1000000}")
+                    break
         
         if fx_loc == -1:
+            print("Warning: MMM Global Options FX not found in Monitor FX, using defaults")
             return options
         
-        # Read parameters from FX
-        loc_offset = 0
+        # REAPER uses sequential parameter indices, not JSFX slider numbers
+        # Parameter 0 = slider1 (jsfx_id), so use loc_offset=1 to skip it
+        loc_offset = 1
         
-        # Core generation parameters (sliders 10-20)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 10 + loc_offset, 0, 0)
-        options.temperature = 0.5 + val * 1.5
+        print(f"Reading parameters from FX at index {fx_loc} with loc_offset={loc_offset}")
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 11 + loc_offset, 0, 0)
-        options.tracks_per_step = int(1 + val * 7)
+        # Core generation parameters - REAPER returns actual slider values, no scaling needed!
+        # slider10-20 map to parameters 1-11
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 0 + loc_offset, 0, 0)
+        options.temperature = val
+        print(f"  Temperature: {options.temperature:.3f}")
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 12 + loc_offset, 0, 0)
-        options.bars_per_step = int(1 + val * 3)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 1 + loc_offset, 0, 0)
+        options.tracks_per_step = int(val)
+        print(f"  Tracks per step: {options.tracks_per_step}")
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 13 + loc_offset, 0, 0)
-        options.model_dim = int(2 + val * 6)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 2 + loc_offset, 0, 0)
+        options.bars_per_step = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 14 + loc_offset, 0, 0)
-        options.percentage = int(10 + val * 90)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 3 + loc_offset, 0, 0)
+        options.model_dim = int(val)
+        print(f"  Model dim: {options.model_dim}")
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 15 + loc_offset, 0, 0)
-        options.max_steps = int(50 + val * 950)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 4 + loc_offset, 0, 0)
+        options.percentage = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 16 + loc_offset, 0, 0)
-        options.batch_size = int(1 + val * 3)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 5 + loc_offset, 0, 0)
+        options.max_steps = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 17 + loc_offset, 0, 0)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 6 + loc_offset, 0, 0)
+        options.batch_size = int(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 7 + loc_offset, 0, 0)
         options.shuffle = bool(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 18 + loc_offset, 0, 0)
-        options.sampling_seed = int(-1 + val * 10000)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 8 + loc_offset, 0, 0)
+        options.sampling_seed = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 19 + loc_offset, 0, 0)
-        options.mask_top_k = int(val * 50)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 9 + loc_offset, 0, 0)
+        options.mask_top_k = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 20 + loc_offset, 0, 0)
-        options.polyphony_hard_limit = int(1 + val * 15)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 10 + loc_offset, 0, 0)
+        options.polyphony_hard_limit = int(val)
         
-        # CA-compatible parameters (sliders 30-33)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 30 + loc_offset, 0, 0)
-        options.rhy_cond = int(val * 2)
+        # CA-compatible parameters
+        # slider30-33 map to parameters 12-15
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 11 + loc_offset, 0, 0)
+        options.rhy_cond = int(val)
         
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 31 + loc_offset, 0, 0)
-        options.do_note_range_cond = int(val * 2)
-        
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 32 + loc_offset, 0, 0)
-        options.enc_no_repeat_ngram_size = int(val * 10)
-        
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 33 + loc_offset, 0, 0)
-        options.variation_alg = int(val * 2)
-        
-        # UI flags (sliders 40-43)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 40 + loc_offset, 0, 0)
-        options.disp_tr_to_midi_inst = bool(val)
-        
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 41 + loc_offset, 0, 0)
-        options.gen_notes_are_selected = bool(val)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 12 + loc_offset, 0, 0)
+        options.do_note_range_cond = int(val)
         
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 13 + loc_offset, 0, 0)
-        options.display_warnings = bool(val)
+        options.enc_no_repeat_ngram_size = int(val)
         
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 14 + loc_offset, 0, 0)
+        options.variation_alg = int(val)
+        
+        # UI flags
+        # slider40-43 map to parameters 16-19
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 15 + loc_offset, 0, 0)
+        options.disp_tr_to_midi_inst = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 16 + loc_offset, 0, 0)
+        options.gen_notes_are_selected = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 17 + loc_offset, 0, 0)
+        options.display_warnings = bool(val)
+        
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 18 + loc_offset, 0, 0)
         options.verbose = bool(val)
     
     except Exception as e:
@@ -142,18 +160,22 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                    has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
     """
     Call the MMM server via XML-RPC
-    Includes start_measure and end_measure for proper selection bounds
+    Uses parameters passed to function, supplementing with global options for MMM-specific params
     """
     from xmlrpc.client import ServerProxy
     import xmlrpc.client
     
+    print(f"\ncall_nn_infill called with temperature={temperature}")
+    
     try:
         proxy = ServerProxy('http://127.0.0.1:3456')
         
-        # Get global options and convert to dict
+        # Read global options for MMM-specific parameters not in CA signature
         options = get_global_options()
+        
+        # Build options dict using passed parameters where available
         options_dict = {
-            'temperature': options.temperature,
+            'temperature': temperature,  # Use passed parameter, not options.temperature
             'tracks_per_step': options.tracks_per_step,
             'bars_per_step': options.bars_per_step,
             'model_dim': options.model_dim,
@@ -165,6 +187,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             'mask_top_k': options.mask_top_k,
             'polyphony_hard_limit': options.polyphony_hard_limit
         }
+        
+        print(f"Sending to server: temperature={options_dict['temperature']}, model_dim={options_dict['model_dim']}")
         
         res = proxy.call_nn_infill(
             s, 
@@ -186,9 +210,3 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         print('MMM server connection failed. Make sure mmm_nn_server.py is running on port 3456.')
         print(f'Error: {e}')
         raise
-
-
-def build_mmm_generation_request(global_options, track_options, project_data):
-    """Not used in current unified architecture - using direct server"""
-    print("No need to build MMM request - using direct server")
-    return None
