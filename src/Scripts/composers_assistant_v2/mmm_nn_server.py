@@ -156,42 +156,50 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
 def build_track_specific_bar_mode(S, measures_to_generate, extra_id_to_measure, extra_id_to_track, debug=False):
     """
     Build bar_mode dictionary with track-specific infill ranges.
-    Uses S structure to determine which tracks actually have empty measures.
-    
-    Args:
-        S: MidiSongByMeasure object
-        measures_to_generate: set of measure indices to infill
-        extra_id_to_measure: dict mapping extra_id -> measure
-        extra_id_to_track: dict mapping extra_id -> track_idx (may be unreliable)
-        debug: whether to print debug info
-    
-    Returns:
-        dict: bar_mode suitable for PromptConfig
+    When extra_id tokens are present, include those measures EVEN IF they have content,
+    because the user explicitly wants to regenerate them.
     """
     bar_mode = {"bars": {}}
     
     if not measures_to_generate:
         return bar_mode
     
-    # Check each track in S to see which has empty measures
+    # Build reverse mapping: measure -> extra_id
+    measure_to_extra_id = {v: k for k, v in extra_id_to_measure.items()}
+    
+    # Check each track in S to see which measures need generation
     track_to_measures = {}
     
     for track_idx, track in enumerate(S.tracks):
         track_measures = []
         for measure_idx in measures_to_generate:
+            # CRITICAL: Include measure if it has an extra_id token for this track
+            # This handles the case where user wants to REPLACE existing content
+            has_extra_id_for_this_track = (
+                measure_idx in measure_to_extra_id and
+                extra_id_to_track.get(measure_to_extra_id[measure_idx]) == track_idx
+            )
+            
             # Check if this measure is empty in this track
+            is_empty = False
             if measure_idx >= len(track.tracks_by_measure):
-                track_measures.append(measure_idx)
+                is_empty = True
             else:
                 measure_track = track.tracks_by_measure[measure_idx]
                 if not (hasattr(measure_track, 'note_ons') and measure_track.note_ons):
-                    track_measures.append(measure_idx)
+                    is_empty = True
+            
+            # Include measure if it's empty OR has an extra_id for this track
+            if is_empty or has_extra_id_for_this_track:
+                track_measures.append(measure_idx)
+                if debug and has_extra_id_for_this_track and not is_empty:
+                    print(f"    Track {track_idx}, Measure {measure_idx}: has content but extra_id present, will regenerate")
         
         if track_measures:
             track_to_measures[track_idx] = track_measures
     
     if debug:
-        print(f"  Track-to-measures mapping (from S structure):")
+        print(f"  Track-to-measures mapping:")
         for track_idx, measures in sorted(track_to_measures.items()):
             print(f"    Track {track_idx}: {sorted(measures)}")
     
@@ -207,21 +215,22 @@ def build_track_specific_bar_mode(S, measures_to_generate, extra_id_to_measure, 
         range_start = sorted_measures[0]
         range_end = sorted_measures[0]
         
-        for measure in sorted_measures:
+        for measure in sorted_measures[1:]:
             if measure == range_end:
                 range_end = measure + 1
+            elif measure == range_end + 1:
+                range_end = measure
             else:
-                ranges.append((range_start, range_end, []))
+                ranges.append((range_start, range_end + 1, []))
                 range_start = measure
-                range_end = measure + 1
+                range_end = measure
         
-        ranges.append((range_start, range_end, []))
+        ranges.append((range_start, range_end + 1, []))
         
         bar_mode["bars"][track_idx] = ranges
         
         if debug:
-            print(f"  Track {track_idx}: {len(track_measures)} measures need infilling")
-            print(f"    Ranges: {ranges}")
+            print(f"  Track {track_idx} ranges: {ranges}")
     
     return bar_mode
 
