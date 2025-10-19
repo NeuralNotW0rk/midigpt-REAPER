@@ -20,11 +20,9 @@ def run_command(cmd, capture_output=False, cwd=None):
     """Run command with proper error handling and shell escaping"""
     try:
         if isinstance(cmd, str):
-            # For string commands, use shell=True but be careful with escaping
             result = subprocess.run(cmd, shell=True, check=True, 
                                   capture_output=capture_output, text=True, cwd=cwd)
         else:
-            # For list commands, no shell needed
             result = subprocess.run(cmd, check=True, 
                                   capture_output=capture_output, text=True, cwd=cwd)
         return result
@@ -47,7 +45,6 @@ def check_python():
             result = run_command(f"{cmd} --version", capture_output=True)
             version_str = result.stdout.strip()
             
-            # Extract version numbers
             version_parts = version_str.split()[-1].split('.')
             major, minor = int(version_parts[0]), int(version_parts[1])
                 
@@ -72,6 +69,37 @@ def check_cuda():
     except:
         print("No CUDA detected - using CPU-only PyTorch")
         return False
+
+def install_rust_macos():
+    """Install Rust on macOS if not already present"""
+    if platform.system() != "Darwin":
+        return
+    
+    print("Checking for Rust installation...")
+    
+    try:
+        result = run_command("rustc --version", capture_output=True)
+        print(f"Rust already installed: {result.stdout.strip()}")
+        return
+    except:
+        print("Rust not found, installing...")
+    
+    print("Installing Rust toolchain...")
+    try:
+        run_command("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y")
+        
+        cargo_env = Path.home() / ".cargo/env"
+        if cargo_env.exists():
+            print("Sourcing Rust environment...")
+            os.environ["PATH"] = f"{Path.home() / '.cargo/bin'}:{os.environ.get('PATH', '')}"
+        
+        result = run_command("rustc --version", capture_output=True)
+        print(f"Rust installed successfully: {result.stdout.strip()}")
+        
+    except Exception as e:
+        print(f"Rust installation failed: {e}")
+        print("You may need to manually install Rust from https://rustup.rs/")
+        print("After installation, restart your terminal and re-run this script.")
 
 def setup_venv(python_cmd):
     """Create virtual environment"""
@@ -109,7 +137,6 @@ def install_core_dependencies(has_cuda=False):
     
     print("Installing core dependencies...")
     
-    # Install PyTorch - use list format to avoid shell parsing issues
     if has_cuda:
         print("Installing PyTorch with CUDA...")
         run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio", 
@@ -119,9 +146,8 @@ def install_core_dependencies(has_cuda=False):
         run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio",
                     "--index-url", "https://download.pytorch.org/whl/cpu"])
     
-    # Install other core dependencies - use list format to prevent shell interpretation of <>
     deps = [
-        ("numpy", "numpy==1.26.4"),        # Critical: constraint NumPy to 1.x
+        ("numpy", "numpy==1.26.4"),
         ("protobuf", "protobuf>=4.0.0"), 
         ("pybind11", "pybind11[global]>=2.12.0"),
         ("transformers", "transformers==4.41.0"),
@@ -131,21 +157,18 @@ def install_core_dependencies(has_cuda=False):
     
     for name, constraint in deps:
         print(f"Installing {constraint}...")
-        # Use list format instead of string to avoid shell parsing of < > symbols
         run_command([pip_cmd, "install", constraint])
 
 def install_project_requirements():
     """Install project-specific requirements"""
     pip_cmd = str(get_pip_command())
     
-    # Install MIDI libraries
     midi_libs = ["mido>=1.1.16", "miditoolkit"]
     
     for lib in midi_libs:
         print(f"Installing {lib}...")
         run_command([pip_cmd, "install", lib])
     
-    # Install other project requirements
     other_libs = ["portion", "sentencepiece", "matplotlib"]
     
     for lib in other_libs:
@@ -153,10 +176,9 @@ def install_project_requirements():
         run_command([pip_cmd, "install", lib])
 
 def clone_mmm():
-    """Clone MMM repository from the python-3-9-refactor branch"""
+    """Clone MMM repository from the cpp_port branch"""
     if Path("MMM").exists():
         print("MMM repository already exists")
-        # Check if we're on the correct branch
         try:
             result = run_command("git branch --show-current", capture_output=True, cwd="MMM")
             current_branch = result.stdout.strip()
@@ -174,7 +196,7 @@ def clone_mmm():
     print(f"MMM repository cloned from {MMM_BRANCH} branch")
 
 def build_mmm():
-    """Build and install MMM using the --install flag"""
+    """Build and install MMM using pip install"""
     print("Building and installing MMM...")
     
     if not Path("MMM").exists():
@@ -194,11 +216,11 @@ def build_mmm():
 
 def setup_reaper_integration():
     """Setup REAPER integration"""
-    if platform.system() == "Darwin":  # macOS
+    if platform.system() == "Darwin":
         reaper_path = Path.home() / "Library/Application Support/REAPER"
     elif platform.system() == "Windows":
         reaper_path = Path.home() / "AppData/Roaming/REAPER"
-    else:  # Linux
+    else:
         reaper_path = Path.home() / ".config/REAPER"
     
     if not reaper_path.exists():
@@ -207,7 +229,6 @@ def setup_reaper_integration():
     
     print(f"Setting up REAPER integration at: {reaper_path}")
     
-    # Create symlinks
     project_root = Path.cwd()
     scripts_src = project_root / "Scripts"
     effects_src = project_root / "Effects"
@@ -215,14 +236,12 @@ def setup_reaper_integration():
     scripts_dst = reaper_path / "Scripts/composers_assistant_v2"
     effects_dst = reaper_path / "Effects/composers_assistant_v2"
     
-    # Create Scripts symlink
     if scripts_src.exists():
         if scripts_dst.exists():
             scripts_dst.unlink()
         scripts_dst.symlink_to(scripts_src)
         print(f"Scripts symlinked: {scripts_dst}")
     
-    # Create Effects symlink  
     if effects_src.exists():
         if effects_dst.exists():
             effects_dst.unlink()
@@ -235,7 +254,6 @@ def download_models():
     if not models_dir.exists():
         models_dir.mkdir()
     
-    # Check if models are already present
     if any(models_dir.glob("*.bin")) or any(models_dir.glob("*.pth")):
         print("Models already present")
         return
@@ -246,10 +264,8 @@ def verify_installation():
     """Verify all components are working"""
     print("\nVerifying installation...")
     
-    # Get absolute path to virtual environment python
     python_cmd = str(get_python_command())
     
-    # Test core imports
     test_imports = [
         ("import torch", "PyTorch"),
         ("import numpy", "NumPy"), 
@@ -263,7 +279,6 @@ def verify_installation():
         except:
             print(f"  ✗ {name}")
     
-    # Test MMM import
     try:
         run_command([python_cmd, "-c", "import mmm; print('MMM: Ready')"], 
                    capture_output=True)
@@ -296,29 +311,21 @@ def main():
     print("=" * 50)
     
     try:
-        # Environment setup
         python_cmd = check_python()
         has_cuda = check_cuda()
-        setup_venv(python_cmd)
         
-        # Dependencies
+        setup_venv(python_cmd)
         install_core_dependencies(has_cuda)
         install_project_requirements()
+
+        install_rust_macos()
         
-        # MMM integration
         clone_mmm()
         midi_success = build_mmm()
         
-        # REAPER integration
         setup_reaper_integration()
-        
-        # Models
         download_models()
-        
-        # Verification
         verify_installation()
-        
-        # Completion
         print_completion_message()
         
         if not midi_success:
