@@ -60,8 +60,20 @@ def initialize_mmm():
 
 
 def parse_measures_with_extra_ids(s, start_measure, end_measure, debug=False):
+    """
+    Parse CA string to find measures and tracks with extra_ids.
+    
+    Returns:
+        marked_measures: set of measure indices
+        extra_id_to_measure: dict mapping extra_id -> measure
+        extra_id_to_track: dict mapping extra_id -> track_idx
+    """
+    if debug:
+        print('  CA string preview:', s[:200] if len(s) > 200 else s)
+    
     marked_measures = set()
     extra_id_to_measure = {}
+    extra_id_to_track = {}
     
     measure_starts = []
     for match in re.finditer(r';M:\d+', s):
@@ -70,51 +82,52 @@ def parse_measures_with_extra_ids(s, start_measure, end_measure, debug=False):
     if not measure_starts:
         if debug:
             print("  No measure markers found in CA string")
-        return marked_measures, extra_id_to_measure
+        return marked_measures, extra_id_to_measure, extra_id_to_track
     
     if debug:
         print(f"  Found {len(measure_starts)} measure markers in CA string")
     
-    measure_sections = []
+    # Process each section
     for i in range(len(measure_starts)):
         section_start = measure_starts[i]
         section_end = measure_starts[i + 1] if i + 1 < len(measure_starts) else len(s)
         section_text = s[section_start:section_end]
-        has_extra_id = '<extra_id_' in section_text
         
-        if has_extra_id:
-            extra_id_match = re.search(r'<extra_id_(\d+)>', section_text)
-            if extra_id_match:
-                extra_id = int(extra_id_match.group(1))
-                measure_sections.append({
-                    'section_idx': i,
-                    'extra_id': extra_id,
-                    'has_extra_id': True
-                })
-    
-    for section in measure_sections:
-        project_measure = start_measure + section['section_idx']
+        # Check if this section has an extra_id
+        extra_id_match = re.search(r'<extra_id_(\d+)>', section_text)
+        if not extra_id_match:
+            continue
+        
+        extra_id = int(extra_id_match.group(1))
+        
+        # Extract track index from I: marker
+        track_match = re.search(r';I:(\d+)', section_text)
+        track_idx = int(track_match.group(1)) if track_match else 0
+        
+        project_measure = start_measure + i
         
         if project_measure > end_measure:
             break
-            
+        
         marked_measures.add(project_measure)
-        extra_id_to_measure[section['extra_id']] = project_measure
+        extra_id_to_measure[extra_id] = project_measure
+        extra_id_to_track[extra_id] = track_idx
         
         if debug:
-            print(f"    Measure {project_measure}: extra_id_{section['extra_id']}")
+            print(f"    Measure {project_measure}, Track {track_idx}: extra_id_{extra_id}")
     
-    return marked_measures, extra_id_to_measure
+    return marked_measures, extra_id_to_measure, extra_id_to_track
 
 
 def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids, debug=False):
     measures_to_generate = set()
     extra_id_to_measure = {}
+    extra_id_to_track = {}
     
     if start_measure is None or end_measure is None:
         if debug:
             print("  No selection bounds")
-        return measures_to_generate, extra_id_to_measure
+        return measures_to_generate, extra_id_to_measure, extra_id_to_track
     
     if debug:
         print(f"\n=== MEASURE DETECTION ===")
@@ -122,11 +135,14 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
         print(f"  Has extra_ids: {has_extra_ids}")
     
     if has_extra_ids:
-        marked_measures, extra_id_to_measure = parse_measures_with_extra_ids(s, start_measure, end_measure, debug)
+        marked_measures, extra_id_to_measure, extra_id_to_track = parse_measures_with_extra_ids(
+            s, start_measure, end_measure, debug
+        )
         measures_to_generate = marked_measures
         if debug:
             print(f"  Marked measures: {sorted(marked_measures)}")
             print(f"  Extra_id mapping: {extra_id_to_measure}")
+            print(f"  Track mapping: {extra_id_to_track}")
     else:
         if debug:
             print("  No extra_ids, nothing to generate")
@@ -134,7 +150,80 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
     if debug:
         print(f"  Will generate: {sorted(measures_to_generate)}")
     
-    return measures_to_generate, extra_id_to_measure
+    return measures_to_generate, extra_id_to_measure, extra_id_to_track
+
+
+def build_track_specific_bar_mode(S, measures_to_generate, extra_id_to_measure, extra_id_to_track, debug=False):
+    """
+    Build bar_mode dictionary with track-specific infill ranges.
+    Uses S structure to determine which tracks actually have empty measures.
+    
+    Args:
+        S: MidiSongByMeasure object
+        measures_to_generate: set of measure indices to infill
+        extra_id_to_measure: dict mapping extra_id -> measure
+        extra_id_to_track: dict mapping extra_id -> track_idx (may be unreliable)
+        debug: whether to print debug info
+    
+    Returns:
+        dict: bar_mode suitable for PromptConfig
+    """
+    bar_mode = {"bars": {}}
+    
+    if not measures_to_generate:
+        return bar_mode
+    
+    # Check each track in S to see which has empty measures
+    track_to_measures = {}
+    
+    for track_idx, track in enumerate(S.tracks):
+        track_measures = []
+        for measure_idx in measures_to_generate:
+            # Check if this measure is empty in this track
+            if measure_idx >= len(track.tracks_by_measure):
+                track_measures.append(measure_idx)
+            else:
+                measure_track = track.tracks_by_measure[measure_idx]
+                if not (hasattr(measure_track, 'note_ons') and measure_track.note_ons):
+                    track_measures.append(measure_idx)
+        
+        if track_measures:
+            track_to_measures[track_idx] = track_measures
+    
+    if debug:
+        print(f"  Track-to-measures mapping (from S structure):")
+        for track_idx, measures in sorted(track_to_measures.items()):
+            print(f"    Track {track_idx}: {sorted(measures)}")
+    
+    # Build ranges for each track
+    for track_idx, track_measures in track_to_measures.items():
+        if not track_measures:
+            continue
+        
+        sorted_measures = sorted(track_measures)
+        
+        # Group into contiguous ranges
+        ranges = []
+        range_start = sorted_measures[0]
+        range_end = sorted_measures[0]
+        
+        for measure in sorted_measures:
+            if measure == range_end:
+                range_end = measure + 1
+            else:
+                ranges.append((range_start, range_end, []))
+                range_start = measure
+                range_end = measure + 1
+        
+        ranges.append((range_start, range_end, []))
+        
+        bar_mode["bars"][track_idx] = ranges
+        
+        if debug:
+            print(f"  Track {track_idx}: {len(track_measures)} measures need infilling")
+            print(f"    Ranges: {ranges}")
+    
+    return bar_mode
 
 
 def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_to_generate, 
@@ -211,7 +300,6 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
     if DEBUG:
         print(f"  Extracted {len(all_notes)} notes from MIDI")
     
-    # No adjustment needed - MIDI contains full project at original indices
     notes_by_measure = {m: [] for m in measures_to_generate}
     
     for note in all_notes:
@@ -278,9 +366,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
     temperature = options_dict.get('temperature', 1.0)
     model_dim = options_dict.get('model_dim', 4)
     max_steps = options_dict.get('max_steps', 200)
-    shuffle = options_dict.get('shuffle', True)
+    shuffle = options_dict.get('shuffle', False)
     sampling_seed = options_dict.get('sampling_seed', -1)
-    mask_top_k = options_dict.get('mask_top_k', 0)
     
     if temperature < 0.5:
         temperature = 0.5
@@ -315,7 +402,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             print(f"  Extra IDs: {extra_ids}")
             print(f"  Project: {len(project_measures)} measures, {len(S.tracks)} tracks")
         
-        measures_to_generate, extra_id_to_measure = detect_measures_to_generate(
+        measures_to_generate, extra_id_to_measure, extra_id_to_track = detect_measures_to_generate(
             S, s, start_measure, end_measure, bool(extra_ids), debug=DEBUG
         )
         
@@ -324,9 +411,9 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
                 print("  No measures to generate")
             return f";<extra_id_{actual_extra_id}>"
         
-        # Dump full S to MIDI (don't trim - preserves note on/off pairs)
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
+        temp_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_in.mid'
         S.dump(filename=temp_midi_path)
         
         if DEBUG:
@@ -352,36 +439,21 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             print(f"  Context length: {context_length} bars (on each side of target)")
             print(f"  Measures to infill: {sorted(measures_to_generate)}")
         
-        bar_mode = {"bars": {}}
+        # Build track-specific bar mode
+        bar_mode = build_track_specific_bar_mode(
+            S, measures_to_generate, extra_id_to_measure, extra_id_to_track, debug=DEBUG
+        )
         
-        # Use project measure indices directly (no adjustment needed)
-        sorted_measures = sorted(measures_to_generate)
-        
-        if not sorted_measures:
+        if not bar_mode["bars"]:
             if DEBUG:
-                print("  No measures to generate, using empty config")
+                print("  No tracks need infilling, using empty config")
             prompt_cfg = PromptConfig({}, context_length=context_length)
         else:
-            ranges = []
-            range_start = sorted_measures[0]
-            range_end = sorted_measures[0]
-            
-            for measure in sorted_measures:
-                if measure == range_end:
-                    range_end = measure + 1
-                else:
-                    ranges.append((range_start, range_end, []))
-                    range_start = measure
-                    range_end = measure + 1
-            
-            ranges.append((range_start, range_end, []))
-            
-            bar_mode["bars"][0] = ranges
-            
             if DEBUG:
                 print(f"  Total tracks in score: {len(S.tracks)}")
-                print(f"  Configuring infill for track 0 only")
-                print(f"  Bar ranges to infill: {ranges}")
+                print(f"  Tracks configured for infilling: {len(bar_mode['bars'])}")
+                for track_idx, ranges in bar_mode["bars"].items():
+                    print(f"    Track {track_idx}: {ranges}")
             
             prompt_cfg = PromptConfig(bar_mode, context_length=context_length)
         
@@ -433,6 +505,7 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
+        result_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_out.mid'
         
         try:
             generated_score.save(result_midi_path)
@@ -466,8 +539,9 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         )
         
         try:
-            os.unlink(temp_midi_path)
-            os.unlink(result_midi_path)
+            #os.unlink(temp_midi_path)
+            #os.unlink(result_midi_path)
+            pass
         except:
             pass
         
