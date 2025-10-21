@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Composer's Assistant v2 - Complete Setup Script
-Fixed version with proper NumPy constraint handling
+Cross-platform version with Windows support
 """
 
 import os
@@ -16,90 +16,76 @@ PYTHON_MIN_VERSION = (3, 9)
 MMM_REPO = "https://github.com/DaoTwenty/MMM.git"
 MMM_BRANCH = "cpp_port"
 
-def run_command(cmd, capture_output=False, cwd=None):
-    """Run command with proper error handling and shell escaping"""
+def run_command(cmd, capture_output=False, cwd=None, check=True):
+    """Run command with proper error handling"""
     try:
         if isinstance(cmd, str):
-            result = subprocess.run(cmd, shell=True, check=True, 
+            result = subprocess.run(cmd, shell=True, check=check,
                                   capture_output=capture_output, text=True, cwd=cwd)
         else:
-            result = subprocess.run(cmd, check=True, 
+            result = subprocess.run(cmd, check=check,
                                   capture_output=capture_output, text=True, cwd=cwd)
         return result
     except subprocess.CalledProcessError as e:
-        print(f"Command failed: {cmd}")
-        print(f"Error: {e}")
-        if capture_output:
-            print(f"Output: {e.stdout}")
-            print(f"Error: {e.stderr}")
+        if check:
+            print(f"Command failed: {cmd}")
+            print(f"Error: {e}")
+            if capture_output and e.stdout:
+                print(f"Output: {e.stdout}")
+            if capture_output and e.stderr:
+                print(f"Error: {e.stderr}")
+        raise
+    except FileNotFoundError as e:
+        if check:
+            print(f"Command not found: {cmd}")
         raise
 
 def check_python():
     """Check for compatible Python version"""
     print("Checking Python version...")
     
-    python_commands = ["python3.9", "python3", "python"]
+    if platform.system() == "Windows":
+        python_commands = ["python"]
+    else:
+        python_commands = ["python3.9", "python3", "python"]
     
     for cmd in python_commands:
         try:
-            result = run_command(f"{cmd} --version", capture_output=True)
+            result = run_command(f"{cmd} --version", capture_output=True, check=False)
+            if result.returncode != 0:
+                continue
+                
             version_str = result.stdout.strip()
-            
             version_parts = version_str.split()[-1].split('.')
             major, minor = int(version_parts[0]), int(version_parts[1])
                 
             if (major, minor) >= PYTHON_MIN_VERSION:
                 print(f"Compatible Python found: {version_str}")
                 return cmd
-        except:
+        except (subprocess.CalledProcessError, FileNotFoundError, ValueError, IndexError):
             continue
     
     print(f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ not found")
-    print("Install Python 3.9+:")
-    print("  macOS: brew install python@3.9")
-    print("  Ubuntu: sudo apt install python3.9 python3.9-venv")
+    if platform.system() == "Windows":
+        print("Install Python 3.9+ from: https://www.python.org/downloads/")
+    else:
+        print("Install Python 3.9+:")
+        print("  macOS: brew install python@3.9")
+        print("  Ubuntu: sudo apt install python3.9 python3.9-venv")
     sys.exit(1)
 
 def check_cuda():
     """Check if CUDA is available"""
     try:
-        run_command("nvidia-smi", capture_output=True)
-        print("CUDA detected")
-        return True
-    except:
-        print("No CUDA detected - using CPU-only PyTorch")
-        return False
-
-def install_rust_macos():
-    """Install Rust on macOS if not already present"""
-    if platform.system() != "Darwin":
-        return
+        result = run_command("nvidia-smi", capture_output=True, check=False)
+        if result.returncode == 0:
+            print("CUDA detected")
+            return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
     
-    print("Checking for Rust installation...")
-    
-    try:
-        result = run_command("rustc --version", capture_output=True)
-        print(f"Rust already installed: {result.stdout.strip()}")
-        return
-    except:
-        print("Rust not found, installing...")
-    
-    print("Installing Rust toolchain...")
-    try:
-        run_command("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y")
-        
-        cargo_env = Path.home() / ".cargo/env"
-        if cargo_env.exists():
-            print("Sourcing Rust environment...")
-            os.environ["PATH"] = f"{Path.home() / '.cargo/bin'}:{os.environ.get('PATH', '')}"
-        
-        result = run_command("rustc --version", capture_output=True)
-        print(f"Rust installed successfully: {result.stdout.strip()}")
-        
-    except Exception as e:
-        print(f"Rust installation failed: {e}")
-        print("You may need to manually install Rust from https://rustup.rs/")
-        print("After installation, restart your terminal and re-run this script.")
+    print("No CUDA detected - using CPU-only PyTorch")
+    return False
 
 def setup_venv(python_cmd):
     """Create virtual environment"""
@@ -131,9 +117,10 @@ def get_python_command():
 def install_core_dependencies(has_cuda=False):
     """Install core Python dependencies with proper constraint handling"""
     pip_cmd = str(get_pip_command())
+    python_cmd = str(get_python_command())
     
     print("Upgrading pip...")
-    run_command([pip_cmd, "install", "--upgrade", "pip", "setuptools", "wheel"])
+    run_command([python_cmd, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
     
     print("Installing core dependencies...")
     
@@ -175,18 +162,51 @@ def install_project_requirements():
         print(f"Installing {lib}...")
         run_command([pip_cmd, "install", lib])
 
+def install_rust_macos():
+    """Install Rust on macOS if not already present"""
+    if platform.system() != "Darwin":
+        return
+    
+    print("Checking for Rust installation...")
+    
+    try:
+        result = run_command("rustc --version", capture_output=True, check=False)
+        if result.returncode == 0:
+            print(f"Rust already installed: {result.stdout.strip()}")
+            return
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("Rust not found, installing...")
+    
+    print("Installing Rust toolchain...")
+    try:
+        run_command("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y")
+        
+        cargo_env = Path.home() / ".cargo/env"
+        if cargo_env.exists():
+            print("Sourcing Rust environment...")
+            os.environ["PATH"] = f"{Path.home() / '.cargo/bin'}:{os.environ.get('PATH', '')}"
+        
+        result = run_command("rustc --version", capture_output=True)
+        print(f"Rust installed successfully: {result.stdout.strip()}")
+        
+    except Exception as e:
+        print(f"Rust installation failed: {e}")
+        print("You may need to manually install Rust from https://rustup.rs/")
+        print("After installation, restart your terminal and re-run this script.")
+
 def clone_mmm():
     """Clone MMM repository from the cpp_port branch"""
     if Path("MMM").exists():
         print("MMM repository already exists")
         try:
-            result = run_command("git branch --show-current", capture_output=True, cwd="MMM")
-            current_branch = result.stdout.strip()
-            if current_branch != MMM_BRANCH:
-                print(f"Switching from {current_branch} to {MMM_BRANCH} branch...")
-                run_command(f"git checkout {MMM_BRANCH}", cwd="MMM")
-            else:
-                print(f"Already on {MMM_BRANCH} branch")
+            result = run_command("git branch --show-current", capture_output=True, cwd="MMM", check=False)
+            if result.returncode == 0:
+                current_branch = result.stdout.strip()
+                if current_branch != MMM_BRANCH:
+                    print(f"Switching from {current_branch} to {MMM_BRANCH} branch...")
+                    run_command(f"git checkout {MMM_BRANCH}", cwd="MMM")
+                else:
+                    print(f"Already on {MMM_BRANCH} branch")
         except:
             print("Could not determine current branch, proceeding with existing repo")
         return
@@ -238,15 +258,31 @@ def setup_reaper_integration():
     
     if scripts_src.exists():
         if scripts_dst.exists():
-            scripts_dst.unlink()
-        scripts_dst.symlink_to(scripts_src)
-        print(f"Scripts symlinked: {scripts_dst}")
+            if scripts_dst.is_symlink():
+                scripts_dst.unlink()
+            else:
+                shutil.rmtree(scripts_dst)
+        try:
+            scripts_dst.symlink_to(scripts_src)
+            print(f"Scripts symlinked: {scripts_dst}")
+        except OSError:
+            print(f"Could not create symlink, copying instead...")
+            shutil.copytree(scripts_src, scripts_dst, dirs_exist_ok=True)
+            print(f"Scripts copied: {scripts_dst}")
     
     if effects_src.exists():
         if effects_dst.exists():
-            effects_dst.unlink()
-        effects_dst.symlink_to(effects_src)
-        print(f"Effects symlinked: {effects_dst}")
+            if effects_dst.is_symlink():
+                effects_dst.unlink()
+            else:
+                shutil.rmtree(effects_dst)
+        try:
+            effects_dst.symlink_to(effects_src)
+            print(f"Effects symlinked: {effects_dst}")
+        except OSError:
+            print(f"Could not create symlink, copying instead...")
+            shutil.copytree(effects_src, effects_dst, dirs_exist_ok=True)
+            print(f"Effects copied: {effects_dst}")
 
 def download_models():
     """Download required models if not present"""
@@ -275,31 +311,35 @@ def verify_installation():
     for test_cmd, name in test_imports:
         try:
             run_command([python_cmd, "-c", test_cmd], capture_output=True)
-            print(f"  ✓ {name}")
+            print(f"  verified {name}")
         except:
-            print(f"  ✗ {name}")
+            print(f"  missing {name}")
     
     try:
-        run_command([python_cmd, "-c", "import mmm; print('MMM: Ready')"], 
-                   capture_output=True)
-        print("  ✓ MMM import (installed)")
+        result = run_command([python_cmd, "-c", "import mmm; print('MMM: Ready')"], 
+                           capture_output=True, check=False)
+        if result.returncode == 0:
+            print("  verified MMM import")
+        else:
+            print("  missing MMM import - requires manual completion")
     except:
-        print("  ✗ MMM import - requires manual completion")
+        print("  missing MMM import - requires manual completion")
 
 def print_completion_message():
     """Print completion message and next steps"""
-    activate_cmd = f"source {VENV_NAME}/bin/activate"
     if platform.system() == "Windows":
         activate_cmd = f"{VENV_NAME}\\Scripts\\activate"
+    else:
+        activate_cmd = f"source {VENV_NAME}/bin/activate"
     
     print("\n" + "="*50)
-    print("Setup Complete!")
+    print("Setup Complete")
     print("="*50)
     print(f"\nTo activate the environment: {activate_cmd}")
     print("\nNext steps:")
     print("1. Start the server: python start_server.py start")
     print("2. Open REAPER and load Composer's Assistant scripts")
-    print("3. Begin composing with AI assistance!")
+    print("3. Begin composing with AI assistance")
     
     print(f"\nTo verify your virtual environment is working:")
     print(f"  {activate_cmd}")
@@ -337,6 +377,8 @@ def main():
         sys.exit(1)
     except Exception as e:
         print(f"\nSetup failed: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
