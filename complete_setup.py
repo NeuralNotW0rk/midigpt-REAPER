@@ -1,241 +1,19 @@
-#!/usr/bin/env python3
 """
-Composer's Assistant v2 - Complete Setup Script
-Cross-platform version with Windows support
+Complete setup script with fixed Windows copying.
 """
 
 import os
 import sys
-import subprocess
 import shutil
 import platform
 from pathlib import Path
+import subprocess
 
-VENV_NAME = "venv"
-PYTHON_MIN_VERSION = (3, 9)
-MMM_REPO = "https://github.com/DaoTwenty/MMM.git"
-MMM_BRANCH = "cpp_port"
-
-def run_command(cmd, capture_output=False, cwd=None, check=True):
-    """Run command with proper error handling"""
-    try:
-        if isinstance(cmd, str):
-            result = subprocess.run(cmd, shell=True, check=check,
-                                  capture_output=capture_output, text=True, cwd=cwd)
-        else:
-            result = subprocess.run(cmd, check=check,
-                                  capture_output=capture_output, text=True, cwd=cwd)
-        return result
-    except subprocess.CalledProcessError as e:
-        if check:
-            print(f"Command failed: {cmd}")
-            print(f"Error: {e}")
-            if capture_output and e.stdout:
-                print(f"Output: {e.stdout}")
-            if capture_output and e.stderr:
-                print(f"Error: {e.stderr}")
-        raise
-    except FileNotFoundError as e:
-        if check:
-            print(f"Command not found: {cmd}")
-        raise
-
-def check_python():
-    """Check for compatible Python version"""
-    print("Checking Python version...")
-    
-    if platform.system() == "Windows":
-        python_commands = ["python"]
-    else:
-        python_commands = ["python3.9", "python3", "python"]
-    
-    for cmd in python_commands:
-        try:
-            result = run_command(f"{cmd} --version", capture_output=True, check=False)
-            if result.returncode != 0:
-                continue
-                
-            version_str = result.stdout.strip()
-            version_parts = version_str.split()[-1].split('.')
-            major, minor = int(version_parts[0]), int(version_parts[1])
-                
-            if (major, minor) >= PYTHON_MIN_VERSION:
-                print(f"Compatible Python found: {version_str}")
-                return cmd
-        except (subprocess.CalledProcessError, FileNotFoundError, ValueError, IndexError):
-            continue
-    
-    print(f"Python {PYTHON_MIN_VERSION[0]}.{PYTHON_MIN_VERSION[1]}+ not found")
-    if platform.system() == "Windows":
-        print("Install Python 3.9+ from: https://www.python.org/downloads/")
-    else:
-        print("Install Python 3.9+:")
-        print("  macOS: brew install python@3.9")
-        print("  Ubuntu: sudo apt install python3.9 python3.9-venv")
-    sys.exit(1)
-
-def check_cuda():
-    """Check if CUDA is available"""
-    try:
-        result = run_command("nvidia-smi", capture_output=True, check=False)
-        if result.returncode == 0:
-            print("CUDA detected")
-            return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-    
-    print("No CUDA detected - using CPU-only PyTorch")
-    return False
-
-def setup_venv(python_cmd):
-    """Create virtual environment"""
-    venv_path = Path(VENV_NAME)
-    
-    if venv_path.exists():
-        print(f"Virtual environment exists: {VENV_NAME}")
-        return
-    
-    print("Creating virtual environment...")
-    run_command(f"{python_cmd} -m venv {VENV_NAME}")
-    print(f"Virtual environment created: {VENV_NAME}")
-
-def get_pip_command():
-    """Get pip command for the virtual environment"""
-    if platform.system() == "Windows":
-        return Path(VENV_NAME) / "Scripts" / "pip"
-    else:
-        return Path(VENV_NAME) / "bin" / "pip"
-
-def get_python_command():
-    """Get Python command for the virtual environment"""
-    current_dir = Path.cwd()
-    if platform.system() == "Windows":
-        return str(current_dir / VENV_NAME / "Scripts" / "python")
-    else:
-        return str(current_dir / VENV_NAME / "bin" / "python")
-
-def install_core_dependencies(has_cuda=False):
-    """Install core Python dependencies with proper constraint handling"""
-    pip_cmd = str(get_pip_command())
-    python_cmd = str(get_python_command())
-    
-    print("Upgrading pip...")
-    run_command([python_cmd, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"])
-    
-    print("Installing core dependencies...")
-    
-    if has_cuda:
-        print("Installing PyTorch with CUDA...")
-        run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio", 
-                    "--index-url", "https://download.pytorch.org/whl/cu118"])
-    else:
-        print("Installing CPU-only PyTorch...")
-        run_command([pip_cmd, "install", "torch>=2.0.0", "torchvision", "torchaudio",
-                    "--index-url", "https://download.pytorch.org/whl/cpu"])
-    
-    deps = [
-        ("numpy", "numpy==1.26.4"),
-        ("protobuf", "protobuf>=4.0.0"), 
-        ("pybind11", "pybind11[global]>=2.12.0"),
-        ("transformers", "transformers==4.41.0"),
-        ("cmake", "cmake>=3.16.0"),
-        ("tqdm", "tqdm")
-    ]
-    
-    for name, constraint in deps:
-        print(f"Installing {constraint}...")
-        run_command([pip_cmd, "install", constraint])
-
-def install_project_requirements():
-    """Install project-specific requirements"""
-    pip_cmd = str(get_pip_command())
-    
-    midi_libs = ["mido>=1.1.16", "miditoolkit"]
-    
-    for lib in midi_libs:
-        print(f"Installing {lib}...")
-        run_command([pip_cmd, "install", lib])
-    
-    other_libs = ["portion", "sentencepiece", "matplotlib"]
-    
-    for lib in other_libs:
-        print(f"Installing {lib}...")
-        run_command([pip_cmd, "install", lib])
-
-def install_rust_macos():
-    """Install Rust on macOS if not already present"""
-    if platform.system() != "Darwin":
-        return
-    
-    print("Checking for Rust installation...")
-    
-    try:
-        result = run_command("rustc --version", capture_output=True, check=False)
-        if result.returncode == 0:
-            print(f"Rust already installed: {result.stdout.strip()}")
-            return
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("Rust not found, installing...")
-    
-    print("Installing Rust toolchain...")
-    try:
-        run_command("curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y")
-        
-        cargo_env = Path.home() / ".cargo/env"
-        if cargo_env.exists():
-            print("Sourcing Rust environment...")
-            os.environ["PATH"] = f"{Path.home() / '.cargo/bin'}:{os.environ.get('PATH', '')}"
-        
-        result = run_command("rustc --version", capture_output=True)
-        print(f"Rust installed successfully: {result.stdout.strip()}")
-        
-    except Exception as e:
-        print(f"Rust installation failed: {e}")
-        print("You may need to manually install Rust from https://rustup.rs/")
-        print("After installation, restart your terminal and re-run this script.")
-
-def clone_mmm():
-    """Clone MMM repository from the cpp_port branch"""
-    if Path("MMM").exists():
-        print("MMM repository already exists")
-        try:
-            result = run_command("git branch --show-current", capture_output=True, cwd="MMM", check=False)
-            if result.returncode == 0:
-                current_branch = result.stdout.strip()
-                if current_branch != MMM_BRANCH:
-                    print(f"Switching from {current_branch} to {MMM_BRANCH} branch...")
-                    run_command(f"git checkout {MMM_BRANCH}", cwd="MMM")
-                else:
-                    print(f"Already on {MMM_BRANCH} branch")
-        except:
-            print("Could not determine current branch, proceeding with existing repo")
-        return
-    
-    print(f"Cloning MMM repository ({MMM_BRANCH} branch)...")
-    run_command(f"git clone -b {MMM_BRANCH} {MMM_REPO}")
-    print(f"MMM repository cloned from {MMM_BRANCH} branch")
-
-def build_mmm():
-    """Build and install MMM using pip install"""
-    print("Building and installing MMM...")
-    
-    if not Path("MMM").exists():
-        print("MMM directory not found")
-        return False
-    
-    try:
-        python_cmd = str(get_python_command())
-        run_command(f"{python_cmd} -m pip install .", cwd="MMM")
-        
-        print("MMM built and installed successfully")
-        return True
-        
-    except Exception as e:
-        print(f"MMM install failed: {e}")
-        return False
 
 def setup_reaper_integration():
-    """Setup REAPER integration"""
+    """Setup REAPER integration by copying files to REAPER directories."""
+    
+    # Determine REAPER path based on OS
     if platform.system() == "Darwin":
         reaper_path = Path.home() / "Library/Application Support/REAPER"
     elif platform.system() == "Windows":
@@ -245,141 +23,248 @@ def setup_reaper_integration():
     
     if not reaper_path.exists():
         print(f"REAPER not found at {reaper_path}")
-        return
+        print("Please install REAPER first")
+        return False
     
     print(f"Setting up REAPER integration at: {reaper_path}")
+    print()
     
     project_root = Path.cwd()
-    scripts_src = project_root / "Scripts"
-    effects_src = project_root / "Effects"
+    scripts_src = project_root / "src" / "Scripts" / "composers_assistant_v2"
+    effects_src = project_root / "src" / "Effects" / "composers_assistant_v2"
     
-    scripts_dst = reaper_path / "Scripts/composers_assistant_v2"
-    effects_dst = reaper_path / "Effects/composers_assistant_v2"
+    scripts_dst = reaper_path / "Scripts" / "composers_assistant_v2"
+    effects_dst = reaper_path / "Effects" / "composers_assistant_v2"
     
+    success = True
+    
+    # Handle Scripts
     if scripts_src.exists():
-        if scripts_dst.exists():
-            if scripts_dst.is_symlink():
-                scripts_dst.unlink()
-            else:
-                shutil.rmtree(scripts_dst)
+        print(f"Processing Scripts...")
+        print(f"  Source: {scripts_src}")
+        print(f"  Destination: {scripts_dst}")
+        
         try:
-            scripts_dst.symlink_to(scripts_src)
-            print(f"Scripts symlinked: {scripts_dst}")
-        except OSError:
-            print(f"Could not create symlink, copying instead...")
+            # Remove existing destination (whether symlink or directory)
+            if scripts_dst.exists() or scripts_dst.is_symlink():
+                if scripts_dst.is_symlink():
+                    scripts_dst.unlink()
+                    print(f"  Removed existing symlink")
+                elif scripts_dst.is_dir():
+                    shutil.rmtree(scripts_dst)
+                    print(f"  Removed existing directory")
+            
+            # Create parent directory
+            scripts_dst.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Copy all files
             shutil.copytree(scripts_src, scripts_dst, dirs_exist_ok=True)
-            print(f"Scripts copied: {scripts_dst}")
+            print(f"  [OK] Scripts copied successfully")
+            
+            # Verify key files
+            key_files = ['rpr_mmm_functions.py', 'mmm_nn_server.py']
+            for fname in key_files:
+                if (scripts_dst / fname).exists():
+                    print(f"    - {fname} ✓")
+                else:
+                    print(f"    - {fname} ✗ MISSING")
+                    success = False
+            
+        except Exception as e:
+            print(f"  [ERROR] Failed to copy Scripts: {e}")
+            import traceback
+            traceback.print_exc()
+            success = False
+    else:
+        print(f"  [WARNING] Source not found: {scripts_src}")
+        success = False
     
+    print()
+    
+    # Handle Effects
     if effects_src.exists():
-        if effects_dst.exists():
-            if effects_dst.is_symlink():
-                effects_dst.unlink()
-            else:
-                shutil.rmtree(effects_dst)
+        print(f"Processing Effects...")
+        print(f"  Source: {effects_src}")
+        print(f"  Destination: {effects_dst}")
+        
         try:
-            effects_dst.symlink_to(effects_src)
-            print(f"Effects symlinked: {effects_dst}")
-        except OSError:
-            print(f"Could not create symlink, copying instead...")
+            # Remove existing destination (whether symlink or directory)
+            if effects_dst.exists() or effects_dst.is_symlink():
+                if effects_dst.is_symlink():
+                    effects_dst.unlink()
+                    print(f"  Removed existing symlink")
+                elif effects_dst.is_dir():
+                    shutil.rmtree(effects_dst)
+                    print(f"  Removed existing directory")
+            
+            # Create parent directory
+            effects_dst.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Copy all files
             shutil.copytree(effects_src, effects_dst, dirs_exist_ok=True)
-            print(f"Effects copied: {effects_dst}")
-
-def download_models():
-    """Download required models if not present"""
-    models_dir = Path("models")
-    if not models_dir.exists():
-        models_dir.mkdir()
+            print(f"  [OK] Effects copied successfully")
+            
+            # Verify key files
+            key_files = ['MMM Track Options.js', 'MMM Global Options']
+            for fname in key_files:
+                if (effects_dst / fname).exists():
+                    print(f"    - {fname} ✓")
+                else:
+                    print(f"    - {fname} ✗ MISSING")
+                    success = False
+            
+        except Exception as e:
+            print(f"  [ERROR] Failed to copy Effects: {e}")
+            import traceback
+            traceback.print_exc()
+            success = False
+    else:
+        print(f"  [WARNING] Source not found: {effects_src}")
+        success = False
     
-    if any(models_dir.glob("*.bin")) or any(models_dir.glob("*.pth")):
-        print("Models already present")
+    print()
+    
+    if success:
+        print("="*60)
+        print("REAPER INTEGRATION SETUP COMPLETE")
+        print("="*60)
+        print()
+        print("Files copied to:")
+        print(f"  {scripts_dst}")
+        print(f"  {effects_dst}")
+        print()
+        print("Next steps:")
+        print("  1. Restart REAPER")
+        print("  2. In REAPER, add 'MMM Global Options' to Monitor FX")
+        print("  3. Add 'MMM Track Options' to tracks as needed")
+        print("  4. Start mmm_nn_server.py before running scripts")
+        print()
+        print("Note: Files are copied, not symlinked.")
+        print("      Run this script again to update after code changes.")
+    else:
+        print("="*60)
+        print("SETUP INCOMPLETE - SOME FILES MISSING")
+        print("="*60)
+        print()
+        print("Check the errors above and verify:")
+        print(f"  1. You're running from project root: {project_root}")
+        print(f"  2. Source files exist in: {scripts_src} and {effects_src}")
+    
+    return success
+
+
+def install_dependencies():
+    """Install Python dependencies."""
+    print("\n" + "="*60)
+    print("INSTALLING PYTHON DEPENDENCIES")
+    print("="*60 + "\n")
+    
+    try:
+        # Upgrade pip
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--upgrade", "pip"])
+        
+        # Install from requirements.txt if it exists
+        requirements_file = Path("requirements.txt")
+        if requirements_file.exists():
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"])
+            print("\n[OK] Dependencies installed from requirements.txt")
+        else:
+            print("[WARNING] requirements.txt not found")
+            print("Installing core dependencies...")
+            # Install essential packages
+            core_packages = ["numpy<2.0", "mido", "xmlrpc"]
+            for package in core_packages:
+                try:
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                except:
+                    print(f"[WARNING] Could not install {package}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"[ERROR] Dependency installation failed: {e}")
+        return False
+
+
+def check_current_installation():
+    """Check what's currently installed in REAPER."""
+    print("\n" + "="*60)
+    print("CHECKING CURRENT INSTALLATION")
+    print("="*60 + "\n")
+    
+    if platform.system() == "Darwin":
+        reaper_path = Path.home() / "Library/Application Support/REAPER"
+    elif platform.system() == "Windows":
+        reaper_path = Path.home() / "AppData/Roaming/REAPER"
+    else:
+        reaper_path = Path.home() / ".config/REAPER"
+    
+    if not reaper_path.exists():
+        print(f"REAPER directory not found at: {reaper_path}")
         return
     
-    print("Model download would occur here - implement as needed")
-
-def verify_installation():
-    """Verify all components are working"""
-    print("\nVerifying installation...")
+    print(f"REAPER directory: {reaper_path}\n")
     
-    python_cmd = str(get_python_command())
-    
-    test_imports = [
-        ("import torch", "PyTorch"),
-        ("import numpy", "NumPy"), 
-        ("import transformers", "Transformers")
+    # Check key MMM files
+    mmm_files = [
+        ("Scripts/composers_assistant_v2/rpr_mmm_functions.py", "Script"),
+        ("Scripts/composers_assistant_v2/mmm_nn_server.py", "Script"),
+        ("Effects/composers_assistant_v2/MMM Track Options.js", "Effect"),
+        ("Effects/composers_assistant_v2/MMM Global Options", "Effect"),
     ]
     
-    for test_cmd, name in test_imports:
-        try:
-            run_command([python_cmd, "-c", test_cmd], capture_output=True)
-            print(f"  verified {name}")
-        except:
-            print(f"  missing {name}")
-    
-    try:
-        result = run_command([python_cmd, "-c", "import mmm; print('MMM: Ready')"], 
-                           capture_output=True, check=False)
-        if result.returncode == 0:
-            print("  verified MMM import")
+    installed_count = 0
+    for file_path, file_type in mmm_files:
+        full_path = reaper_path / file_path
+        if full_path.exists():
+            print(f"  [✓] {file_type}: {file_path}")
+            installed_count += 1
         else:
-            print("  missing MMM import - requires manual completion")
-    except:
-        print("  missing MMM import - requires manual completion")
+            print(f"  [✗] {file_type}: {file_path}")
+    
+    print(f"\nMMM Files: {installed_count}/{len(mmm_files)} installed")
 
-def print_completion_message():
-    """Print completion message and next steps"""
-    if platform.system() == "Windows":
-        activate_cmd = f"{VENV_NAME}\\Scripts\\activate"
-    else:
-        activate_cmd = f"source {VENV_NAME}/bin/activate"
-    
-    print("\n" + "="*50)
-    print("Setup Complete")
-    print("="*50)
-    print(f"\nTo activate the environment: {activate_cmd}")
-    print("\nNext steps:")
-    print("1. Start the server: python start_server.py start")
-    print("2. Open REAPER and load Composer's Assistant scripts")
-    print("3. Begin composing with AI assistance")
-    
-    print(f"\nTo verify your virtual environment is working:")
-    print(f"  {activate_cmd}")
-    print(f"  python -c \"import sys; print(sys.executable)\"")
-    print(f"  python -c \"import numpy; print('NumPy:', numpy.__version__)\"")
 
 def main():
-    print("Composer's Assistant v2 - Complete Setup")
-    print("=" * 50)
+    print("\n" + "="*60)
+    print("MMM SETUP FOR REAPER")
+    print("="*60)
     
-    try:
-        python_cmd = check_python()
-        has_cuda = check_cuda()
-        
-        setup_venv(python_cmd)
-        install_core_dependencies(has_cuda)
-        install_project_requirements()
-
-        install_rust_macos()
-        
-        clone_mmm()
-        midi_success = build_mmm()
-        
+    # Check current installation
+    check_current_installation()
+    
+    # Ask what to do
+    print("\n" + "-"*60)
+    print("\nOptions:")
+    print("  1. Install REAPER integration (copy files)")
+    print("  2. Install Python dependencies")
+    print("  3. Both (recommended for first-time setup)")
+    print("  4. Exit")
+    
+    choice = input("\nYour choice (1-4): ").strip()
+    
+    if choice == "1":
         setup_reaper_integration()
-        download_models()
-        verify_installation()
-        print_completion_message()
-        
-        if not midi_success:
-            print("\nNote: MMM build may require manual completion")
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        print("\nSetup interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\nSetup failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    elif choice == "2":
+        install_dependencies()
+    elif choice == "3":
+        deps_ok = install_dependencies()
+        if deps_ok:
+            print("\nProceeding to REAPER integration...")
+            setup_reaper_integration()
+        else:
+            print("\n[WARNING] Dependency installation had issues")
+            proceed = input("Continue with REAPER setup anyway? (y/n): ")
+            if proceed.lower() in ['y', 'yes']:
+                setup_reaper_integration()
+    elif choice == "4":
+        print("Setup cancelled")
+    else:
+        print("Invalid choice")
+    
+    print("\n" + "="*60)
+    input("Press Enter to exit...")
+
 
 if __name__ == "__main__":
     main()
