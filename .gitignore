@@ -6,3 +6,4 @@ src/Scripts/composers_assistant_v2/models*
 /venv
 /MMM
 /models
+*.mid

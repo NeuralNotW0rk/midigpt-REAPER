@@ -422,7 +422,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
-        temp_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_in.mid'
+        if DEBUG:
+            temp_midi_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_in.mid')
         S.dump(filename=temp_midi_path)
         
         if DEBUG:
@@ -514,7 +515,8 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
-        result_midi_path = '/Users/griffinpage/Documents/GitHub/midigpt-REAPER/test_out.mid'
+        if DEBUG:
+            result_midi_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'test_out.mid')
         
         try:
             generated_score.save(result_midi_path)
@@ -548,9 +550,9 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         )
         
         try:
-            #os.unlink(temp_midi_path)
-            #os.unlink(result_midi_path)
-            pass
+            if not DEBUG:
+                os.unlink(temp_midi_path)
+                os.unlink(result_midi_path)
         except:
             pass
         
