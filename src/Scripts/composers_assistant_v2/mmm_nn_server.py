@@ -34,8 +34,8 @@ def initialize_mmm():
     
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        tokenizer_path = os.path.join(script_dir, 'models/MMM.json')
-        model_path = os.path.join(script_dir, 'models/model.onnx')
+        tokenizer_path = os.path.join(script_dir, 'models_mmm/MMM_trained.json')
+        model_path = os.path.join(script_dir, 'models_mmm/model.onnx')
         
         if DEBUG:
             print("\n=== INITIALIZING MMM ===")
