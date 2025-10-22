@@ -13,13 +13,42 @@ import encoding_functions as enc
 import tokenizer_functions as tok
 import preprocessing_functions as pre
 import midi_inst_to_name
+import label_preprocessor
+
 
 DEBUG = False
 ALWAYS_TOP_P = True  # True or False: False makes the first attempt for any prompt use greedy decoding
 EXCL_TRACK_NAME_SUBSTRINGS = ['ignore', 'IGNORE', 'Ignore']
 PERMUTE_MASKS = True
 
+# False (or 0), or 1 ( = section boundary aware experiment),
+# or 2 (annotated segments experiment),
+# or 2.1 (segments experiment baseline - not boundary aware)
+SECTION_BOUNDARY_EXPERIMENT = 2
+
 CPQ = ms.extended_lcm(cs.QUANTIZE)
+
+LABEL_MAP_LOWER = {
+    "intro": "Intro",
+    "outro": "Outro",
+    "verse": "Verse",
+    "pre-chorus": "Pre-Chorus",
+    "prechorus": "Pre-Chorus",
+    "chorus": "Chorus",
+    "bridge": "Bridge",
+    "solo": "Solo",
+
+    "pre-verse": "Instrumental",
+    "preverse": "Instrumental",
+    "post-chorus": "Instrumental",
+    "postchorus": "Instrumental",
+    "instrumental": "Instrumental",
+    "interlude": "Instrumental",
+    "transition": "Instrumental",
+
+    "coda": "Outro",
+    "end": "End"
+}
 
 
 def qns_to_clicks(n_qn):
@@ -321,6 +350,7 @@ class UserCommandsForNNInputStr:
     rhythmic_conditioning_locations: set
     track_measure_commands: dict[tuple[int, int], str]
     track_gen_options_by_track_idx: dict[int, dict[str, str]]
+    poly_mono_commands: dict
 
 
 def get_user_commands_for_nn_input_str(S, do_note_range_conditioning_by_measure, do_rhythmic_conditioning,
@@ -386,7 +416,8 @@ def get_user_commands_for_nn_input_str(S, do_note_range_conditioning_by_measure,
                                                               measurement_str_or_encoding_instruction_str=key)
 
                 # TODO - when doing rhythmic conditioning, only add this instruction str if it makes sense
-                commands_at_end[S_track_i] += instruction_str
+                if SECTION_BOUNDARY_EXPERIMENT != 1:
+                    commands_at_end[S_track_i] += instruction_str
     # ...and also get "not an octave collapse" commands and note ranges by measure (i.e., track_measure_commands)
 
     track_measure_commands = collections.defaultdict(str)
@@ -436,6 +467,7 @@ def get_user_commands_for_nn_input_str(S, do_note_range_conditioning_by_measure,
     res.rhythmic_conditioning_locations = rhythmic_conditioning_locations
     res.track_measure_commands = track_measure_commands
     res.track_gen_options_by_track_idx = track_gen_options_by_track_idx
+    res.poly_mono_commands = pmc
 
     return res
 
@@ -739,20 +771,51 @@ def get_nn_input_from_project(warn_if_no_masks=True, mask_empty_midi_items=True,
                                                        requests_by_track_i_and_measure_i=requests_by_track_i_and_measure_i,
                                                        track_names=track_names)
 
+    # version 1
+    section_boundaries = [0, 1, 4, 17]
+    section_boundaries_enc = []
+    for i, b in enumerate(section_boundaries):
+        if i == 0:
+            section_boundaries_enc.append((b, 'song_start'))
+        elif i == len(section_boundaries) - 1:
+            section_boundaries_enc.append((b, 'song_end'))
+        else:
+            section_boundaries_enc.append((b, 'internal_boundary'))
+    if not SECTION_BOUNDARY_EXPERIMENT:
+        section_boundaries_enc = None
+
+    # version 2 - includes both section-boundary-aware and unaware (null) model
+    if SECTION_BOUNDARY_EXPERIMENT == 2:
+        project_markers = mt.get_all_project_markers()
+        project_markers = [(a, LABEL_MAP_LOWER.get(b.lower(), 'Chorus')) for a, b in project_markers]
+        project_markers = label_preprocessor.preprocess_labels(project_markers, remove_consecutive_identical=False)
+        project_markers = [(mt.qn_to_measure(round(mt.time_to_QN(a))), str(b)) for a, b in project_markers]
+        if not project_markers:
+            # just setting a reasonable default
+            project_markers = [(0, 'Intro'), (8, 'Verse'), (16, 'Chorus'),
+                               (24, 'Instrumental'), (32, 'Verse'), (40, 'Chorus'), (48, 'Outro')]
+        # print('pm', project_markers)
+        section_boundaries_enc = project_markers
+
     # now encode S to string
+    pmc_enc = user_commands.poly_mono_commands if SECTION_BOUNDARY_EXPERIMENT == 1 else None
+    tmc_enc = user_commands.track_measure_commands if (not SECTION_BOUNDARY_EXPERIMENT or SECTION_BOUNDARY_EXPERIMENT == 2) else None
+
     s, _ = enc.encode_midisongbymeasure_with_masks(S,
                                                    note_off_treatment=tok.spm_type_to_note_off_treatment(cs.SPM_TYPE),
                                                    mask_locations=masks_for_S_in_order,
                                                    measure_slice=(start_measure, end_measure + 1),
                                                    include_heads_for_empty_masked_measures=True,
-                                                   track_measure_commands=user_commands.track_measure_commands,
+                                                   poly_mono_commands=pmc_enc,
+                                                   track_measure_commands=tmc_enc,
                                                    explicit_rhythmic_conditioning_locations=user_commands.rhythmic_conditioning_locations,
                                                    rhythmic_conditioning_type=rhythmic_conditioning_type,
                                                    return_labels_too=False,
                                                    extra_id_st=extra_id_st,
                                                    extra_id_max=255,
                                                    velocity_overrides=velocity_overrides,
-                                                   commands_at_end=user_commands.commands_at_end
+                                                   commands_at_end=user_commands.commands_at_end,
+                                                   section_boundaries=section_boundaries_enc
                                                    )
 
     velocity_intensity_by_measure = get_velocity_intensity_by_measure(s, start_measure)
@@ -764,7 +827,7 @@ def get_nn_input_from_project(warn_if_no_masks=True, mask_empty_midi_items=True,
     has_fully_masked_inst = any(not t.has_notes() for t in S.tracks)
 
     return NNInput(nn_input_string=s,
-                   extra_id_to_miditake_and_measure_i=extra_id_to_miditake_and_measure_i,
+                   extra_id_to_miditake_and_measure_i=extra_id_to_miditake_and_measure_i,  # [(3, 6), (3, 7), (4, 12), ...]
                    MEs_qn=MEs_qn,
                    S=S,
                    continue_=continue_,

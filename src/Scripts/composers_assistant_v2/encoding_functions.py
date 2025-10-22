@@ -40,6 +40,19 @@ ENCODING_INSTRUCTION_LOWEST_NOTE_STRICT = "lowest_note_strict"  # 1 instruction
 ENCODING_INSTRUCTION_HIGHEST_NOTE_LOOSE = "highest_note_loose"  # 1 instruction
 ENCODING_INSTRUCTION_LOWEST_NOTE_LOOSE = "lowest_note_loose"  # 1 instruction
 
+# In order, song_st, internal_boundary, song_end, NONE
+CURRENT_SECTION_BOUNDARY_TYPE = "current_section_boundary_type"  # 10 instructions; The ten are encoded below
+
+# In order, song_st, internal_boundary, song_end, NONE
+NEXT_SECTION_BOUNDARY_TYPE = "next_section_boundary_type"  # 10 instructions; The ten are encoded below
+
+# 1, 2, ..., 126, >=127, NONE
+MEASURE_COUNTDOWN = 'measure_countdown'  # 128 instructions; The 128 is encoded below
+
+# 0, 1, ..., 126, >=126, NONE
+MEASURE_COUNTUP = 'measure_countup'  # 128 instructions; The 128 is encoded below
+NULL_TOKEN = 'null_token'  # 1 instruction; The 1 is encoded below
+
 
 def _build_measurement_and_encoding_instruction_to_instruction_dict() -> dict[tuple[str, int], int]:
     d = {}
@@ -93,6 +106,57 @@ def _build_measurement_and_encoding_instruction_to_instruction_dict() -> dict[tu
     d[(ENCODING_INSTRUCTION_HIGHEST_NOTE_LOOSE, 0)] = i
     i += 1
     d[(ENCODING_INSTRUCTION_LOWEST_NOTE_LOOSE, 0)] = i
+    i += 1
+
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Intro')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Outro')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Verse')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Pre-Chorus')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Chorus')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Bridge')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Solo')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Instrumental')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'End')] = i
+    i += 1
+    d[(CURRENT_SECTION_BOUNDARY_TYPE, 'Other')] = i
+    i += 1
+
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Intro')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Outro')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Verse')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Pre-Chorus')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Chorus')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Bridge')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Solo')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Instrumental')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'End')] = i
+    i += 1
+    d[(NEXT_SECTION_BOUNDARY_TYPE, 'Other')] = i
+    i += 1
+
+    for x in range(128):
+        d[(MEASURE_COUNTUP, x)] = i
+        i += 1
+    for x in range(1, 129):
+        d[(MEASURE_COUNTDOWN, x)] = i
+        i += 1
+    d[(NULL_TOKEN, 0)] = i
     i += 1
 
     return d
@@ -311,6 +375,7 @@ def encode_midisongbymeasure_with_masks(S: "ms.MidiSongByMeasure",
                                         extra_id_max: int = 255,
                                         velocity_overrides: None or dict[int, int] = None,
                                         commands_at_end: None or dict[int, str] = None,
+                                        section_boundaries: None or list[tuple[int, str]] = None,
                                         ) -> tuple[str, str]:
     """
     mask_locations a list of tuples of the form (track_index, measure_index).
@@ -385,6 +450,12 @@ def encode_midisongbymeasure_with_masks(S: "ms.MidiSongByMeasure",
         commands_at_end_temp.update(commands_at_end)
     commands_at_end = commands_at_end_temp
 
+    if section_boundaries is None:
+        section_boundaries = []
+    section_boundaries = [(int(a), str(b)) for a, b in section_boundaries]
+    section_boundaries = list(set(section_boundaries))
+    section_boundaries.sort()
+
     measure_lens = S.get_measure_lengths()
     tempos = S.get_tempo_at_start_of_each_measure()
 
@@ -398,6 +469,48 @@ def encode_midisongbymeasure_with_masks(S: "ms.MidiSongByMeasure",
         s = ';M:{}'.format(get_loudness_level(avg_vel))  # M: how loud (scale of 0 to 7)
         s += ';B:{}'.format(get_bpm_level(tempos[measure_i]))  # B: how fast (tempo; scale of 0 to 7)
         s += ';L:{}'.format(measure_lens[measure_i])  # L: how long (number of clicks)
+
+        # now add section boundary informational tokens
+        # first token: current section boundary type
+        # second token: next section boundary type
+        # third token: # measures since last section boundary ("count up til next"), == 0 iff this is a section boundary
+        # fourth and final token: # measures until section boundary ("countdown til next"); == 1 iff next measure is a section boundary
+        sb_first_coords = [x[0] for x in section_boundaries]
+        i = bisect.bisect_right(sb_first_coords, measure_i) - 1
+
+        # edge case - this is a song with no notes
+        if len(section_boundaries) == 0:
+            cur_section_boundary_type = 'Other'
+            next_section_boundary_type = 'Other'
+            count_up = 127
+            count_down = 128
+        else:
+            if i == -1:
+                # then we are in a measure before the first note onset
+                cur_section_boundary_type = 'Other'
+                next_section_boundary_type = section_boundaries[0][1]
+                count_up = 127
+                count_down = section_boundaries[0][0] - measure_i
+            elif i > len(section_boundaries) - 2:
+                # then we are in or beyond the measure where the last note onset is
+                cur_section_boundary_type = section_boundaries[-1][1]
+                next_section_boundary_type = 'Other'
+                count_up = measure_i - section_boundaries[-1][0]
+                count_down = 128
+            else:
+                cur_section_boundary_type = section_boundaries[i][1]
+                next_section_boundary_type = section_boundaries[i + 1][1]
+                count_up = measure_i - section_boundaries[i][0]
+                count_down = section_boundaries[i + 1][0] - measure_i
+
+        count_up = min(count_up, 127)
+        count_down = min(count_down, 128)
+
+        s += instruction_str(cur_section_boundary_type, CURRENT_SECTION_BOUNDARY_TYPE)
+        s += instruction_str(next_section_boundary_type, NEXT_SECTION_BOUNDARY_TYPE)
+        s += instruction_str(count_up, MEASURE_COUNTUP)
+        s += instruction_str(count_down, MEASURE_COUNTDOWN)
+
         measure_st_strings[measure_i] = s
 
     heads, tails = get_string_encoding_matrices(S, note_off_treatment=note_off_treatment, measure_slice=measure_slice)

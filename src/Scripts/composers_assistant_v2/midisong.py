@@ -1483,8 +1483,10 @@ def _dump(cpq: int, max_click: int, time_sigs, markers, tracks, tempo_changes, f
     res.instruments = []
     for t in tracks:
 
-        # first, fix up notes whose start and end clicks are the same, bc miditoolkit doesn't like that.
         t = copy.copy(t)
+        t.sort()
+
+        # first, fix up notes whose start and end clicks are the same, bc miditoolkit doesn't like that.
         for n in t.notes:
             if n.click == n.end:
                 n.end += 1

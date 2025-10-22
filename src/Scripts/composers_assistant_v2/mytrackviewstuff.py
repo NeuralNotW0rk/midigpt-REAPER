@@ -1,9 +1,39 @@
+import os
+import sys
 from reaper_python import *
 import myfunctions as mf
 import mymidistuff as mm
 import collections
 
 _WARNINGS_PRINTED = set()
+
+
+def get_all_project_markers():
+    def locate_sws_folder():
+        for folder, _, fnames in os.walk(os.path.join(RPR_GetResourcePath(), 'scripts')):
+            if 'sws_python.py' in fnames:
+                return folder
+        return None
+    sws_path = locate_sws_folder()
+    if sws_path is None:
+        raise ValueError('get_all_project_markers requires the SWS extension: https://www.sws-extension.org/')
+
+    sys.path.append(sws_path)
+    import sws_python
+
+    retval, ReaProject_proj, Int_num_markersOut, Int_num_regionsOut = RPR_CountProjectMarkers(0, 0, 0)
+    res = []
+    for idx in range(retval):
+        fast_str = sws_python.SNM_CreateFastString("")
+        markerInfo = RPR_EnumProjectMarkers(idx, 0, 0, 0, 0, 0)
+        sws_python.SNM_GetProjectMarkerName(0, markerInfo[6], markerInfo[2], fast_str)
+        Int_retval, ReaProject_proj, Int_idx, Boolean_isrgnOut, Float_posOut, Float_rgnendOut, String_ameOut, Int_markrgnindexnumberOut, Int_colorOut = RPR_EnumProjectMarkers3(
+            0, idx, 0, 0, 0, 0, 0, 0)
+        t = Float_posOut
+        s = sws_python.SNM_GetFastString(fast_str)
+        res.append((t, s))
+    return res
+
 
 class EnvelopePoint(object):
     def __init__(self, envelope, autoitem_idx, ptidx, time, value, shape, tension, selected):
@@ -376,7 +406,7 @@ def get_tempo_at_st_of_measure(measure_idx):
 def messagebox(msg, title, int_type):
     """int_type: 0=OK, 1=OKCANCEL, 2=ABORTRETRYIGNORE, 3=YESNOCANCEL, 4=YESNO, 5=RETRYCANCEL:
     ret 1=OK, 2=CANCEL, 3=ABORT, 4=RETRY, 5=IGNORE, 6=YES, 7=NO"""
-    RPR_ShowMessageBox(msg, title, int_type)
+    return RPR_ShowMessageBox(msg, title, int_type)
 
 
 def is_SWS_installed() -> bool:
@@ -415,4 +445,9 @@ def get_cursor_position_sec() -> float:
 
 def time_to_QN(t: float) -> float:
     return RPR_TimeMap2_timeToQN(0, t)
+
+
+def QN_to_time(t: float or int) -> float:
+    return RPR_TimeMap2_QNToTime(0, t)
+
 

@@ -338,6 +338,7 @@ MAX_LEN = 1650
 # MORE NEURAL NET TRAINING SETTINGS
 # Do not change any of the following unless you are training a new model from scratch
 QUANTIZE = (8, 6)
+# QUANTIZE = (4, )
 
 # Our primary joined-vocabulary model is SPM_TRAIN_MODEL_WITH_NOTE_DURATION_COMMANDS.
 # Other SentencePiece vocabulary models are currently incompatible with our REAPER scripts.
@@ -693,16 +694,15 @@ else:
     PATH_TO_MODELS = JOINED_PATH_TO_MODELS
 
 
-# TODO: edit/delete before release
 # overrides for the code author. You can ignore these.
-# PATH_TO_TRAIN_MIDI = r''
-# PATH_TO_PROCESSED_TRAIN_MIDI = r''
-# PATH_TO_VAL_MIDI = ''
-# PATH_TO_TEST_MIDI = ''
-# PATH_TO_PROCESSED_VAL_MIDI = r'C:\datasets\lakh\b_lakh_midi_val_processed'
-# PATH_TO_PROCESSED_TEST_MIDI = r'C:\datasets\lakh\c_lakh_midi_test_processed'
-# PATH_TO_TEMP_FILES = r''
-# PATH_TO_TEMP_FILES = r''
-# PATH_TO_MODELS = r''
-
-MIDIGPT_MODEL_PATH = "midigpt_workspace/MIDI-GPT/models/EXPRESSIVE_ENCODER_RES_1920_12_GIGAMIDI_CKPT_150K.pt"
+# TODO: delete before release
+PATH_TO_TRAIN_MIDI = r'C:\datasets\open_midi_train_CA_v2'
+PATH_TO_PROCESSED_TRAIN_MIDI = r'C:\datasets\open_midi_train_processed_CA_v2'
+PATH_TO_VAL_MIDI = r'C:\datasets\lakh\b_lakh_midi_val'
+PATH_TO_PROCESSED_VAL_MIDI = r'C:\datasets\lakh\b_lakh_midi_val_processed'
+PATH_TO_TEST_MIDI = r'C:\datasets\lakh\c_lakh_midi_test'
+PATH_TO_PROCESSED_TEST_MIDI = r'C:\datasets\lakh\c_lakh_midi_test_processed'
+PATH_TO_TEMP_FILES = r'C:\temp\CA_v2_results\v2_large'
+PATH_TO_TEMP_FILES = r'E:\CA v2 - permuted labels\ca_temp'
+PATH_TO_MODELS = r'C:\REAPER\Scripts\me\composer assistant\models_permuted_labels\unjoined'
+# PATH_TO_MODELS = r'E:\CA v2 - permuted labels\models'
