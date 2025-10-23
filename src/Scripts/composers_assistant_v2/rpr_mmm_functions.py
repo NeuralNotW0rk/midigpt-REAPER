@@ -1,6 +1,6 @@
 """
 REAPER Functions for MMM Integration
-Handles parameter reading and server communication
+Handles parameter reading, control string conversion, and server communication
 """
 
 import sys
@@ -32,11 +32,103 @@ try:
 except ImportError as e:
     print(f"Warning: Could not import REAPER modules: {e}")
 
+# Polyphony quantile mapping (matches MMM expectations)
+POLYPHONY_MAP = {
+    0: 'POLYPHONY_ANY',
+    1: 'POLYPHONY_0_1',
+    2: 'POLYPHONY_1_2',
+    3: 'POLYPHONY_2_3',
+    4: 'POLYPHONY_3_4',
+    5: 'POLYPHONY_4_5',
+    6: 'POLYPHONY_5_6',
+    7: 'POLYPHONY_6_7',
+    8: 'POLYPHONY_7_8',
+    9: 'POLYPHONY_8_PLUS'
+}
+
+# GM MIDI Instrument mapping
+INSTRUMENT_MAP = {
+    0: 'acoustic_grand_piano', 1: 'bright_acoustic_piano', 2: 'electric_grand_piano',
+    3: 'honky_tonk_piano', 4: 'electric_piano_1', 5: 'electric_piano_2',
+    6: 'harpsichord', 7: 'clavinet', 8: 'celesta', 9: 'glockenspiel',
+    10: 'music_box', 11: 'vibraphone', 12: 'marimba', 13: 'xylophone',
+    14: 'tubular_bells', 15: 'dulcimer', 16: 'drawbar_organ', 17: 'percussive_organ',
+    18: 'rock_organ', 19: 'church_organ', 20: 'reed_organ', 21: 'accordion',
+    22: 'harmonica', 23: 'tango_accordion', 24: 'acoustic_guitar_nylon', 
+    25: 'acoustic_guitar_steel', 26: 'electric_guitar_jazz', 27: 'electric_guitar_clean',
+    28: 'electric_guitar_muted', 29: 'overdriven_guitar', 30: 'distortion_guitar',
+    31: 'guitar_harmonics', 32: 'acoustic_bass', 33: 'electric_bass_finger',
+    34: 'electric_bass_pick', 35: 'fretless_bass', 36: 'slap_bass_1',
+    37: 'slap_bass_2', 38: 'synth_bass_1', 39: 'synth_bass_2',
+    40: 'violin', 41: 'viola', 42: 'cello', 43: 'contrabass',
+    44: 'tremolo_strings', 45: 'pizzicato_strings', 46: 'orchestral_harp',
+    47: 'timpani', 48: 'string_ensemble_1', 49: 'string_ensemble_2',
+    50: 'synth_strings_1', 51: 'synth_strings_2', 52: 'choir_aahs',
+    53: 'voice_oohs', 54: 'synth_choir', 55: 'orchestra_hit',
+    56: 'trumpet', 57: 'trombone', 58: 'tuba', 59: 'muted_trumpet',
+    60: 'french_horn', 61: 'brass_section', 62: 'synth_brass_1',
+    63: 'synth_brass_2', 64: 'soprano_sax', 65: 'alto_sax',
+    66: 'tenor_sax', 67: 'baritone_sax', 68: 'oboe', 69: 'english_horn',
+    70: 'bassoon', 71: 'clarinet', 72: 'piccolo', 73: 'flute',
+    74: 'recorder', 75: 'pan_flute', 76: 'blown_bottle', 77: 'shakuhachi',
+    78: 'whistle', 79: 'ocarina', 80: 'lead_1_square', 81: 'lead_2_sawtooth',
+    82: 'lead_3_calliope', 83: 'lead_4_chiff', 84: 'lead_5_charang',
+    85: 'lead_6_voice', 86: 'lead_7_fifths', 87: 'lead_8_bass_lead',
+    88: 'pad_1_new_age', 89: 'pad_2_warm', 90: 'pad_3_polysynth',
+    91: 'pad_4_choir', 92: 'pad_5_bowed', 93: 'pad_6_metallic',
+    94: 'pad_7_halo', 95: 'pad_8_sweep', 96: 'fx_1_rain',
+    97: 'fx_2_soundtrack', 98: 'fx_3_crystal', 99: 'fx_4_atmosphere',
+    100: 'fx_5_brightness', 101: 'fx_6_goblins', 102: 'fx_7_echoes',
+    103: 'fx_8_sci_fi', 104: 'sitar', 105: 'banjo', 106: 'shamisen',
+    107: 'koto', 108: 'kalimba', 109: 'bagpipe', 110: 'fiddle',
+    111: 'shanai', 112: 'tinkle_bell', 113: 'agogo', 114: 'steel_drums',
+    115: 'woodblock', 116: 'taiko_drum', 117: 'melodic_tom', 118: 'synth_drum',
+    119: 'reverse_cymbal', 120: 'guitar_fret_noise', 121: 'breath_noise',
+    122: 'seashore', 123: 'bird_tweet', 124: 'telephone_ring', 125: 'helicopter',
+    126: 'applause', 127: 'gunshot', 128: 'drums'
+}
+
+# Track type mapping
+TRACK_TYPE_MAP = {
+    8: 'AUX_DRUM_TRACK',
+    9: 'AUX_INST_TRACK',
+    10: 'STANDARD_TRACK',
+    11: 'STANDARD_DRUM_TRACK',
+    12: 'STANDARD_BOTH'
+}
+
+# Density to horizontal density bin mapping (approximate)
+# Density 0-18 maps to HORIZ_0 through HORIZ_5 bins
+# HORIZ bins: 0=<half notes, 1=half-quarter, 2=quarter-8th, 3=8th-16th, 4=16th-4.5, 5=4.5+
+DENSITY_TO_HORIZ_MAP = {
+    0: 0, 1: 0, 2: 1,  # Very sparse
+    3: 1, 4: 1, 5: 2,  # Sparse
+    6: 2, 7: 2, 8: 3,  # Moderate
+    9: 3, 10: 3, 11: 3,  # Moderate-dense
+    12: 4, 13: 4, 14: 4,  # Dense
+    15: 5, 16: 5, 17: 5, 18: 5  # Very dense
+}
+
+# Polyphony quantile to vertical density bin mapping
+# Min/max quantiles affect polyphony range
+# VERT bins: 0=mono, 1=1.01-2, 2=2.01-3, 3=3.01-4, 4=4+ notes
+POLYPHONY_Q_TO_VERT_MAP = {
+    0: -1,  # Any - no constraint
+    1: 0,   # 0-1 notes = mono
+    2: 1,   # 1-2 notes
+    3: 2,   # 2-3 notes
+    4: 2,   # 3-4 notes
+    5: 3,   # 4-5 notes
+    6: 3,   # 5-6 notes
+    7: 4,   # 6-7 notes
+    8: 4,   # 7-8 notes
+    9: 4    # 8+ notes
+}
+
 def _locate_infiller_global_options_FX_loc() -> int:
-    """-1 means not found (or not enabled). Look on monitor FX. Get the first enabled instance."""
     from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetEnabled, RPR_TrackFX_GetParam
     tr = RPR_GetMasterTrack(-1)
-    n_fx = 100  # search up to 100 FX
+    n_fx = 100
     for i in range(0x1000000, 0x1000000 + n_fx):
         if RPR_TrackFX_GetEnabled(tr, i):
             v = RPR_TrackFX_GetParam(tr, i, 0, 0, 0)[0]
@@ -46,11 +138,9 @@ def _locate_infiller_global_options_FX_loc() -> int:
 
 
 def _locate_mmm_track_options_FX_loc(track) -> int:
-    """-1 means not found (or not enabled). Get the last enabled instance"""
     res = -1
     from reaper_python import RPR_TrackFX_GetEnabled, RPR_TrackFX_GetParam
     for i in range(mt.get_num_FX_on_track(track)):
-    # for i, name in enumerate(mt.get_FX_names_on_track(track)):
         if RPR_TrackFX_GetEnabled(track, i):
             val = RPR_TrackFX_GetParam(track, i, 0, 0, 0)[0]
             if mf.is_approx(val, TRACK_FX_ID) or mf.is_approx(val, 349583024):
@@ -59,16 +149,11 @@ def _locate_mmm_track_options_FX_loc(track) -> int:
 
 
 def get_global_options():
-    """
-    Read global MMM options from master track FX
-    Returns object with all parameters matching MMM server expectations
-    """
+    """Read global MMM options from master track FX"""
     class GlobalOptions:
         pass
     
     options = GlobalOptions()
-    
-    # Default values matching MMM server expectations
     options.temperature = 1.0
     options.tracks_per_step = 1
     options.bars_per_step = 1
@@ -80,8 +165,6 @@ def get_global_options():
     options.sampling_seed = -1
     options.mask_top_k = 0
     options.polyphony_hard_limit = 6
-    
-    # CA-compatible options (used by REAPER scripts but not by MMM)
     options.rhy_cond = 0
     options.do_note_range_cond = 0
     options.enc_no_repeat_ngram_size = 0
@@ -94,105 +177,72 @@ def get_global_options():
     try:
         master = RPR_GetMasterTrack(0)
         if master is None:
-            print("Warning: Could not get master track")
             return options
         
-        # Search Monitor FX chain (like CA does)
-        # Monitor FX uses special index: 0x1000000 + fx_index
         fx_loc = _locate_infiller_global_options_FX_loc()
-        
-        # REAPER uses sequential parameter indices, not JSFX slider numbers
-        # Parameter 0 = slider1 (jsfx_id), so use loc_offset=1 to skip it
         loc_offset = 1
         
-        print(f"Reading parameters from FX at index {fx_loc} with loc_offset={loc_offset}")
-        
-        # Core generation parameters - REAPER returns actual slider values, no scaling needed!
-        # slider10-20 map to parameters 1-11
+        # Read parameters (same as before)
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 0 + loc_offset, 0, 0)
         options.temperature = val
-        print(f"  Temperature: {options.temperature:.3f}")
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 1 + loc_offset, 0, 0)
         options.tracks_per_step = int(val)
-        print(f"  Tracks per step: {options.tracks_per_step}")
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 2 + loc_offset, 0, 0)
         options.bars_per_step = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 3 + loc_offset, 0, 0)
         options.model_dim = int(val)
-        print(f"  Model dim: {options.model_dim}")
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 4 + loc_offset, 0, 0)
         options.percentage = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 5 + loc_offset, 0, 0)
         options.max_steps = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 6 + loc_offset, 0, 0)
         options.batch_size = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 7 + loc_offset, 0, 0)
         options.shuffle = bool(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 8 + loc_offset, 0, 0)
         options.sampling_seed = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 9 + loc_offset, 0, 0)
         options.mask_top_k = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 10 + loc_offset, 0, 0)
         options.polyphony_hard_limit = int(val)
-        
-        # CA-compatible parameters
-        # slider30-33 map to parameters 12-15
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 11 + loc_offset, 0, 0)
         options.rhy_cond = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 12 + loc_offset, 0, 0)
         options.do_note_range_cond = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 13 + loc_offset, 0, 0)
         options.enc_no_repeat_ngram_size = int(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 14 + loc_offset, 0, 0)
         options.variation_alg = int(val)
-        
-        # UI flags
-        # slider40-43 map to parameters 16-19
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 15 + loc_offset, 0, 0)
         options.disp_tr_to_midi_inst = bool(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 16 + loc_offset, 0, 0)
         options.gen_notes_are_selected = bool(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 17 + loc_offset, 0, 0)
         options.display_warnings = bool(val)
-        
         val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 18 + loc_offset, 0, 0)
         options.verbose = bool(val)
     
     except Exception as e:
-        print(f"Warning: Could not read global options: {e}")
+        if DEBUG:
+            print(f"Warning: Could not read global options: {e}")
     
     return options
 
+
 class MMMTrackOptionsObj:
-    track_temperature = -1.0
-    vert_density = -1
-    n_pitch_classes = -1
-    horiz_density = 4
-    rhy_ins = 3
-    step_bin = 4
-    leap_bin = 3
-    low_note_strict = -1
-    high_note_strict = -1
-    low_note_loose = -1
-    high_note_loose = -1
+    """Track options object with streamlined parameters"""
+    def __init__(self):
+        self.track_temperature = -1.0
+        self.instrument = 0
+        self.density = 10
+        self.track_type = 10
+        self.min_polyphony_q = 0
+        self.max_polyphony_q = 0
+        self.polyphony_hard_limit = -1
+
 
 def get_mmm_track_options_by_track_idx() -> dict:
-    """Read MMM Track Options from all tracks, return dict keyed by track index."""
+    """Read MMM Track Options from all tracks"""
     res = {}
     
     try:
@@ -208,49 +258,19 @@ def get_mmm_track_options_by_track_idx() -> dict:
                 opts = MMMTrackOptionsObj()
                 loc_offset = 1
                 
-                # Parameter indices after removing unused sliders:
-                # 0: jsfx_id
-                # 1: track_temperature (slider10)
-                # 2: vert_density (slider20)
-                # 3: n_pitch_classes (slider21)
-                # 4: horiz_density (slider30)
-                # 5: rhy_ins (slider31)
-                # 6: step_bin (slider40)
-                # 7: leap_bin (slider41)
-                # 8: low_note_strict (slider50)
-                # 9: high_note_strict (slider51)
-                # 10: low_note_loose (slider52)
-                # 11: high_note_loose (slider53)
-                
                 opts.track_temperature = RPR_TrackFX_GetParam(t, fx_loc, 0 + loc_offset, 0, 0)[0]
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 1 + loc_offset, 0, 0)[0]
-                opts.vert_density = int(val) - 1
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 2 + loc_offset, 0, 0)[0]
-                opts.n_pitch_classes = int(val) - 1
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 3 + loc_offset, 0, 0)[0]
-                opts.horiz_density = int(val) - 1
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 4 + loc_offset, 0, 0)[0]
-                opts.rhy_ins = int(val) - 1
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 5 + loc_offset, 0, 0)[0]
-                opts.step_bin = int(val) - 1
-                
-                val = RPR_TrackFX_GetParam(t, fx_loc, 6 + loc_offset, 0, 0)[0]
-                opts.leap_bin = int(val) - 1
-                
-                opts.low_note_strict = int(RPR_TrackFX_GetParam(t, fx_loc, 7 + loc_offset, 0, 0)[0])
-                opts.high_note_strict = int(RPR_TrackFX_GetParam(t, fx_loc, 8 + loc_offset, 0, 0)[0])
-                opts.low_note_loose = int(RPR_TrackFX_GetParam(t, fx_loc, 9 + loc_offset, 0, 0)[0])
-                opts.high_note_loose = int(RPR_TrackFX_GetParam(t, fx_loc, 10 + loc_offset, 0, 0)[0])
+                opts.instrument = int(RPR_TrackFX_GetParam(t, fx_loc, 1 + loc_offset, 0, 0)[0])
+                opts.density = int(RPR_TrackFX_GetParam(t, fx_loc, 2 + loc_offset, 0, 0)[0])
+                opts.track_type = int(RPR_TrackFX_GetParam(t, fx_loc, 3 + loc_offset, 0, 0)[0])
+                opts.min_polyphony_q = int(RPR_TrackFX_GetParam(t, fx_loc, 4 + loc_offset, 0, 0)[0])
+                opts.max_polyphony_q = int(RPR_TrackFX_GetParam(t, fx_loc, 5 + loc_offset, 0, 0)[0])
+                opts.polyphony_hard_limit = int(RPR_TrackFX_GetParam(t, fx_loc, 6 + loc_offset, 0, 0)[0])
                 
                 res[i] = opts
                 
                 if DEBUG:
-                    print(f"Track {i} options: vert={opts.vert_density}, horiz={opts.horiz_density}")
+                    print(f"Track {i}: inst={INSTRUMENT_MAP.get(opts.instrument, 'unknown')}, "
+                          f"density={opts.density}, polyphony_q={opts.min_polyphony_q}-{opts.max_polyphony_q}")
         
     except Exception as e:
         if DEBUG:
@@ -258,66 +278,73 @@ def get_mmm_track_options_by_track_idx() -> dict:
     
     return res
 
+
 def convert_track_options_to_control_strings(opts: MMMTrackOptionsObj) -> list:
-    """Convert track options to MMM attribute control strings."""
+    """
+    Convert streamlined track options to MMM attribute control strings.
+    
+    Control string format matches MMM tokenizer expectations:
+    - INST_{program} for instrument (0-128)
+    - DENS_{level} for density (0-18)
+    - HORIZ_{bin} for horizontal density approximation (0-5)
+    - VERT_{bin} for vertical/polyphony density (0-4)
+    - POLY_{quantile} for polyphony constraints
+    """
     controls = []
     
-    if opts.vert_density >= 0:
-        controls.append(f"VERT_{opts.vert_density}")
+    # Instrument control
+    if opts.instrument >= 0:
+        inst_name = INSTRUMENT_MAP.get(opts.instrument, f'instrument_{opts.instrument}')
+        controls.append(f"INST_{opts.instrument}")
     
-    if opts.n_pitch_classes >= 0:
-        controls.append(f"PITCH_CLASS_{opts.n_pitch_classes}")
+    # Density control - map to horizontal density bins
+    if opts.density >= 0:
+        horiz_bin = DENSITY_TO_HORIZ_MAP.get(opts.density, 3)
+        controls.append(f"DENS_{opts.density}")
+        controls.append(f"HORIZ_{horiz_bin}")
     
-    if opts.horiz_density >= 0:
-        controls.append(f"HORIZ_{opts.horiz_density}")
+    # Polyphony controls - use min/max to determine vertical density
+    if opts.min_polyphony_q > 0 or opts.max_polyphony_q > 0:
+        # Use max polyphony to set vertical density target
+        target_q = opts.max_polyphony_q if opts.max_polyphony_q > 0 else opts.min_polyphony_q
+        vert_bin = POLYPHONY_Q_TO_VERT_MAP.get(target_q, -1)
+        
+        if vert_bin >= 0:
+            controls.append(f"VERT_{vert_bin}")
+        
+        # Add explicit polyphony quantile controls
+        if opts.min_polyphony_q > 0:
+            controls.append(f"POLY_MIN_{opts.min_polyphony_q}")
+        if opts.max_polyphony_q > 0:
+            controls.append(f"POLY_MAX_{opts.max_polyphony_q}")
     
-    if opts.rhy_ins >= 0:
-        controls.append(f"RHYTHM_{opts.rhy_ins}")
+    # Track type control
+    if opts.track_type >= 8:
+        track_type_name = TRACK_TYPE_MAP.get(opts.track_type, 'STANDARD_TRACK')
+        controls.append(f"TRACK_TYPE_{opts.track_type}")
     
-    if opts.step_bin >= 0:
-        controls.append(f"STEP_{opts.step_bin}")
-    
-    if opts.leap_bin >= 0:
-        controls.append(f"LEAP_{opts.leap_bin}")
-    
-    if opts.low_note_strict > -1:
-        controls.append(f"LOW_NOTE_STRICT_{opts.low_note_strict}")
-    
-    if opts.high_note_strict > -1:
-        controls.append(f"HIGH_NOTE_STRICT_{opts.high_note_strict}")
-    
-    if opts.low_note_loose > -1:
-        controls.append(f"LOW_NOTE_LOOSE_{opts.low_note_loose}")
-    
-    if opts.high_note_loose > -1:
-        controls.append(f"HIGH_NOTE_LOOSE_{opts.high_note_loose}")
+    if DEBUG and controls:
+        print(f"  Generated controls: {controls}")
     
     return controls
 
 
 def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_size=0, 
                    has_fully_masked_inst=False, temperature=1.0, start_measure=None, end_measure=None):
-    """
-    Call the MMM server via XML-RPC
-    Uses parameters passed to function, supplementing with global options for MMM-specific params
-    """
+    """Call the MMM server via XML-RPC with track options"""
     from xmlrpc.client import ServerProxy
-    import xmlrpc.client
     
-    print(f"\ncall_nn_infill called with temperature={temperature}")
+    if DEBUG:
+        print(f"MMM call_nn_infill: temp={temperature}, measures={start_measure}-{end_measure}")
     
     try:
         proxy = ServerProxy('http://127.0.0.1:3456')
         
-        # Read global options for MMM-specific parameters not in CA signature
         options = get_global_options()
-
-        # Read track-specific options
         track_options = get_mmm_track_options_by_track_idx()
         
-        # Build options dict using passed parameters where available
         options_dict = {
-            'temperature': temperature,  # Use passed parameter, not options.temperature
+            'temperature': temperature,
             'tracks_per_step': options.tracks_per_step,
             'bars_per_step': options.bars_per_step,
             'model_dim': options.model_dim,
@@ -327,29 +354,48 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
             'shuffle': options.shuffle,
             'sampling_seed': options.sampling_seed,
             'mask_top_k': options.mask_top_k,
-            'polyphony_hard_limit': options.polyphony_hard_limit,
-            'track_options': track_options
+            'polyphony_hard_limit': options.polyphony_hard_limit
         }
         
-        print(f"Sending to server: {options_dict}")
+        # Encode S parameter
+        if isinstance(S, ms.MidiSongByMeasure):
+            S_encoded = pre.encode_midisongbymeasure_to_save_dict(S)
+        else:
+            S_encoded = S
         
-        res = proxy.call_nn_infill(
+        # Convert track options to serializable format with control strings
+        # XML-RPC requires string keys
+        track_options_dict = {}
+        for idx, opts in track_options.items():
+            track_options_dict[str(idx)] = {
+                'temperature': opts.track_temperature,
+                'instrument': opts.instrument,
+                'density': opts.density,
+                'track_type': opts.track_type,
+                'min_polyphony_q': opts.min_polyphony_q,
+                'max_polyphony_q': opts.max_polyphony_q,
+                'polyphony_hard_limit': opts.polyphony_hard_limit,
+                'controls': convert_track_options_to_control_strings(opts)
+            }
+        
+        result = proxy.call_nn_infill(
             s, 
-            pre.encode_midisongbymeasure_to_save_dict(S), 
-            use_sampling, 
-            min_length, 
-            enc_no_repeat_ngram_size, 
-            has_fully_masked_inst, 
+            S_encoded,
+            use_sampling,
+            min_length,
+            enc_no_repeat_ngram_size,
+            has_fully_masked_inst,
             options_dict,
-            start_measure, 
+            track_options_dict,
+            start_measure,
             end_measure
         )
-        return res
-    except xmlrpc.client.Fault as e:
-        print('Exception raised by MMM server:')
-        print(str(e))
-        raise
+        
+        if DEBUG:
+            print(f"MMM server returned: {len(result)} chars")
+        
+        return result
+        
     except Exception as e:
-        print('MMM server connection failed. Make sure mmm_nn_server.py is running on port 3456.')
-        print(f'Error: {e}')
-        raise
+        print(f"Error calling MMM server: {e}")
+        return f";<extra_id_0>"
