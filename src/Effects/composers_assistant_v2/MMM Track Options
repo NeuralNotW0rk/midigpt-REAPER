@@ -3,80 +3,31 @@ desc:MMM Track-Specific Generation Options
 slider1:jsfx_id=349583025<349583025, 349583025, 1>-jsfx_id
 
 // Track-specific temperature override
-slider10:track_temperature=-1<-1, 2.0, 0.1>Track Temperature (-1 = use global)
+// slider10:track_temperature=-1<-1, 2.0, 0.1>Track Temperature (-1 = use global)
 
 // Instrument selection (GM MIDI 0-127, 128 = drums)
-slider20:instrument=0<0, 128, 1{0:Acoustic Grand Piano,1:Bright Acoustic Piano,2:Electric Grand Piano,3:Honky-tonk Piano,4:Electric Piano 1,5:Electric Piano 2,6:Harpsichord,7:Clavinet,8:Celesta,9:Glockenspiel,10:Music Box,11:Vibraphone,12:Marimba,13:Xylophone,14:Tubular Bells,15:Dulcimer,16:Drawbar Organ,17:Percussive Organ,18:Rock Organ,19:Church Organ,20:Reed Organ,21:Accordion,22:Harmonica,23:Tango Accordion,24:Acoustic Guitar (nylon),25:Acoustic Guitar (steel),26:Electric Guitar (jazz),27:Electric Guitar (clean),28:Electric Guitar (muted),29:Overdriven Guitar,30:Distortion Guitar,31:Guitar Harmonics,32:Acoustic Bass,33:Electric Bass (finger),34:Electric Bass (pick),35:Fretless Bass,36:Slap Bass 1,37:Slap Bass 2,38:Synth Bass 1,39:Synth Bass 2,40:Violin,41:Viola,42:Cello,43:Contrabass,44:Tremolo Strings,45:Pizzicato Strings,46:Orchestral Harp,47:Timpani,48:String Ensemble 1,49:String Ensemble 2,50:Synth Strings 1,51:Synth Strings 2,52:Choir Aahs,53:Voice Oohs,54:Synth Choir,55:Orchestra Hit,56:Trumpet,57:Trombone,58:Tuba,59:Muted Trumpet,60:French Horn,61:Brass Section,62:Synth Brass 1,63:Synth Brass 2,64:Soprano Sax,65:Alto Sax,66:Tenor Sax,67:Baritone Sax,68:Oboe,69:English Horn,70:Bassoon,71:Clarinet,72:Piccolo,73:Flute,74:Recorder,75:Pan Flute,76:Blown Bottle,77:Shakuhachi,78:Whistle,79:Ocarina,80:Lead 1 (square),81:Lead 2 (sawtooth),82:Lead 3 (calliope),83:Lead 4 (chiff),84:Lead 5 (charang),85:Lead 6 (voice),86:Lead 7 (fifths),87:Lead 8 (bass + lead),88:Pad 1 (new age),89:Pad 2 (warm),90:Pad 3 (polysynth),91:Pad 4 (choir),92:Pad 5 (bowed),93:Pad 6 (metallic),94:Pad 7 (halo),95:Pad 8 (sweep),96:FX 1 (rain),97:FX 2 (soundtrack),98:FX 3 (crystal),99:FX 4 (atmosphere),100:FX 5 (brightness),101:FX 6 (goblins),102:FX 7 (echoes),103:FX 8 (sci-fi),104:Sitar,105:Banjo,106:Shamisen,107:Koto,108:Kalimba,109:Bagpipe,110:Fiddle,111:Shanai,112:Tinkle Bell,113:Agogo,114:Steel Drums,115:Woodblock,116:Taiko Drum,117:Melodic Tom,118:Synth Drum,119:Reverse Cymbal,120:Guitar Fret Noise,121:Breath Noise,122:Seashore,123:Bird Tweet,124:Telephone Ring,125:Helicopter,126:Applause,127:Gunshot,128:Drums}>Instrument
+slider20:instrument=-1<-1, 128, 1{-1:Any,0:Acoustic Grand Piano,1:Bright Acoustic Piano,2:Electric Grand Piano,3:Honky-tonk Piano,4:Electric Piano 1,5:Electric Piano 2,6:Harpsichord,7:Clavinet,8:Celesta,9:Glockenspiel,10:Music Box,11:Vibraphone,12:Marimba,13:Xylophone,14:Tubular Bells,15:Dulcimer,16:Drawbar Organ,17:Percussive Organ,18:Rock Organ,19:Church Organ,20:Reed Organ,21:Accordion,22:Harmonica,23:Tango Accordion,24:Acoustic Guitar (nylon),25:Acoustic Guitar (steel),26:Electric Guitar (jazz),27:Electric Guitar (clean),28:Electric Guitar (muted),29:Overdriven Guitar,30:Distortion Guitar,31:Guitar Harmonics,32:Acoustic Bass,33:Electric Bass (finger),34:Electric Bass (pick),35:Fretless Bass,36:Slap Bass 1,37:Slap Bass 2,38:Synth Bass 1,39:Synth Bass 2,40:Violin,41:Viola,42:Cello,43:Contrabass,44:Tremolo Strings,45:Pizzicato Strings,46:Orchestral Harp,47:Timpani,48:String Ensemble 1,49:String Ensemble 2,50:Synth Strings 1,51:Synth Strings 2,52:Choir Aahs,53:Voice Oohs,54:Synth Choir,55:Orchestra Hit,56:Trumpet,57:Trombone,58:Tuba,59:Muted Trumpet,60:French Horn,61:Brass Section,62:Synth Brass 1,63:Synth Brass 2,64:Soprano Sax,65:Alto Sax,66:Tenor Sax,67:Baritone Sax,68:Oboe,69:English Horn,70:Bassoon,71:Clarinet,72:Piccolo,73:Flute,74:Recorder,75:Pan Flute,76:Blown Bottle,77:Shakuhachi,78:Whistle,79:Ocarina,80:Lead 1 (square),81:Lead 2 (sawtooth),82:Lead 3 (calliope),83:Lead 4 (chiff),84:Lead 5 (charang),85:Lead 6 (voice),86:Lead 7 (fifths),87:Lead 8 (bass + lead),88:Pad 1 (new age),89:Pad 2 (warm),90:Pad 3 (polysynth),91:Pad 4 (choir),92:Pad 5 (bowed),93:Pad 6 (metallic),94:Pad 7 (halo),95:Pad 8 (sweep),96:FX 1 (rain),97:FX 2 (soundtrack),98:FX 3 (crystal),99:FX 4 (atmosphere),100:FX 5 (brightness),101:FX 6 (goblins),102:FX 7 (echoes),103:FX 8 (sci-fi),104:Sitar,105:Banjo,106:Shamisen,107:Koto,108:Kalimba,109:Bagpipe,110:Fiddle,111:Shanai,112:Tinkle Bell,113:Agogo,114:Steel Drums,115:Woodblock,116:Taiko Drum,117:Melodic Tom,118:Synth Drum,119:Reverse Cymbal,120:Guitar Fret Noise,121:Breath Noise,122:Seashore,123:Bird Tweet,124:Telephone Ring,125:Helicopter,126:Applause,127:Gunshot}>Instrument
 
-// Note density (notes per bar)
-slider30:density=10<0, 18, 1>Density (notes per bar)
+// ACBarOnsetPolyphonyMin
+slider30:min_polyphony=0<0, 8, 1>Min Onset Polyphony (0=Any)
+// ACBarOnsetPolyphonyMax
+slider31:max_polyphony=0<0, 8, 1>Max Onset Polyphony (0=Any)
 
-// Track type for MMM generation behavior
-slider40:track_type=10<8, 12, 1{8:Aux Drum Track,9:Aux Inst Track,10:Standard Track,11:Standard Drum Track,12:Standard Both}>Track Type
+// ACBarNoteDensity
+slider40:density=-1<-1, 18, 1>Note Density (-1=Any)
 
-// Polyphony constraints
-slider50:min_polyphony_q=0<0, 9, 1{0:Any,1:0-1 notes,2:1-2 notes,3:2-3 notes,4:3-4 notes,5:4-5 notes,6:5-6 notes,7:6-7 notes,8:7-8 notes,9:8+ notes}>Min Polyphony Quantile
-slider51:max_polyphony_q=0<0, 9, 1{0:Any,1:0-1 notes,2:1-2 notes,3:2-3 notes,4:3-4 notes,5:4-5 notes,6:5-6 notes,7:6-7 notes,8:7-8 notes,9:8+ notes}>Max Polyphony Quantile
-slider52:polyphony_hard_limit=-1<-1, 16, 1>Polyphony Hard Limit (-1 = use global)
-
-// Internal parameter for compatibility
-slider100:rpr_script_min_val=0<0, 0, 1>-rpr_script_min_val
+// ACBarNoteDurationWhole
+slider50:note_dur_whole=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Whole Notes
+// ACBarNoteDurationHalf
+slider51:note_dur_half=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Half Notes
+// ACBarNoteDurationQuarter
+slider52:note_dur_quarter=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Quarter Notes
+// ACBarNoteDurationEight
+slider53:note_dur_eight=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Eight Notes
+// ACBarNoteDurationSixteenth
+slider54:note_dur_sixteenth=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Sixteenth Notes
+// ACBarNoteDurationThirtySecond
+slider55:note_dur_thirtysecond=-1<-1, 1, 1{-1 = Any,0 = No,1 = Yes}>Enable Thirty Second Notes
 
 in_pin:none
 out_pin:none
-
-@init
-// Store previous values for change detection
-track_temp_prev = track_temperature;
-instrument_prev = instrument;
-density_prev = density;
-track_type_prev = track_type;
-min_poly_prev = min_polyphony_q;
-max_poly_prev = max_polyphony_q;
-poly_limit_prev = polyphony_hard_limit;
-
-@slider
-// Validate track temperature range [0.5, 2.0] when not using global
-track_temperature != -1 && track_temperature < 0.5 ? (
-  track_temperature = 0.5;
-);
-
-track_temperature > 2.0 ? (
-  track_temperature = 2.0;
-);
-
-// Ensure min <= max for polyphony quantiles
-min_polyphony_q > max_polyphony_q && max_polyphony_q > 0 ? (
-  max_polyphony_q = min_polyphony_q;
-);
-
-max_polyphony_q < min_polyphony_q && min_polyphony_q > 0 ? (
-  min_polyphony_q = max_polyphony_q;
-);
-
-// Validate density range
-density < 0 ? (
-  density = 0;
-);
-
-density > 18 ? (
-  density = 18;
-);
-
-// Validate instrument range
-instrument < 0 ? (
-  instrument = 0;
-);
-
-instrument > 128 ? (
-  instrument = 128;
-);
-
-// Store current values
-track_temp_prev = track_temperature;
-instrument_prev = instrument;
-density_prev = density;
-track_type_prev = track_type;
-min_poly_prev = min_polyphony_q;
-max_poly_prev = max_polyphony_q;
-poly_limit_prev = polyphony_hard_limit;

@@ -1,6 +1,6 @@
 """
 MMM Server with Track Options Control String Integration
-Applies per-track control strings to bar infill ranges
+Merges working conversion logic with control string support
 """
 
 import sys
@@ -20,6 +20,8 @@ import preprocessing_functions as pre
 MMM_AVAILABLE = False
 MODEL = None
 TOKENIZER = None
+LAST_CALL = None
+LAST_OUTPUTS = set()
 
 try:
     from mmm import Model, Tokenizer, PromptConfig, SamplingEngine, GenerationConfig, Score, generate, ModelConfig
@@ -123,70 +125,72 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
 
 def build_track_specific_bar_mode_with_controls(S, measures_to_generate, extra_id_to_measure, 
                                                   extra_id_to_track, track_options, debug=False):
-    """
-    Build bar_mode dictionary with track-specific infill ranges AND control strings.
-    Integrates per-track attribute controls from REAPER Track Options FX.
-    
-    Returns:
-        {
-            "bars": {
-                track_idx: [
-                    (start_bar, end_bar, ["INST_0", "DENS_10", "HORIZ_3", ...])
-                ]
-            }
-        }
-    """
+    """Build bar_mode with track-specific infill ranges AND control strings"""
     bar_mode = {"bars": {}}
     
     if not measures_to_generate:
         return bar_mode
     
-    # Group measures by track
+    measure_to_extra_id = {v: k for k, v in extra_id_to_measure.items()}
     track_to_measures = {}
-    for measure in measures_to_generate:
-        for extra_id, extra_measure in extra_id_to_measure.items():
-            if extra_measure == measure:
-                track_idx = extra_id_to_track.get(extra_id, 0)
-                if track_idx not in track_to_measures:
-                    track_to_measures[track_idx] = []
-                track_to_measures[track_idx].append(measure)
-                break
     
-    # Build contiguous ranges with controls for each track
-    for track_idx, measures in track_to_measures.items():
-        sorted_measures = sorted(set(measures))
-        ranges = []
-        
-        current_start = sorted_measures[0]
-        current_end = sorted_measures[0] + 1
-        
-        for measure in sorted_measures[1:]:
-            if measure == current_end:
-                current_end = measure + 1
+    for track_idx, track in enumerate(S.tracks):
+        track_measures = []
+        for measure_idx in measures_to_generate:
+            has_extra_id_for_this_track = (
+                measure_idx in measure_to_extra_id and
+                extra_id_to_track.get(measure_to_extra_id[measure_idx]) == track_idx
+            )
+            
+            is_empty = False
+            if measure_idx >= len(track.tracks_by_measure):
+                is_empty = True
             else:
-                # Get control strings for this track if available
-                # Track options dict has string keys from XML-RPC
-                controls = []
-                track_key = str(track_idx)
-                if track_key in track_options:
-                    controls = track_options[track_key].get('controls', [])
-                elif track_idx in track_options:  # Fallback for integer keys
-                    controls = track_options[track_idx].get('controls', [])
-                
-                ranges.append((current_start, current_end, controls))
-                current_start = measure
-                current_end = measure + 1
+                measure_track = track.tracks_by_measure[measure_idx]
+                if not (hasattr(measure_track, 'note_ons') and measure_track.note_ons):
+                    is_empty = True
+            
+            if is_empty or has_extra_id_for_this_track:
+                track_measures.append(measure_idx)
+                if debug and has_extra_id_for_this_track and not is_empty:
+                    print(f"    Track {track_idx}, Measure {measure_idx}: regenerating existing content")
         
-        # Add final range
+        if track_measures:
+            track_to_measures[track_idx] = track_measures
+    
+    if debug:
+        print(f"  Track-to-measures mapping:")
+        for track_idx, measures in sorted(track_to_measures.items()):
+            print(f"    Track {track_idx}: {sorted(measures)}")
+    
+    for track_idx, track_measures in track_to_measures.items():
+        if not track_measures:
+            continue
+        
+        sorted_measures = sorted(track_measures)
+        
+        # Get control strings for this track
         controls = []
         track_key = str(track_idx)
         if track_key in track_options:
             controls = track_options[track_key].get('controls', [])
-        elif track_idx in track_options:  # Fallback for integer keys
+        elif track_idx in track_options:
             controls = track_options[track_idx].get('controls', [])
         
-        ranges.append((current_start, current_end, controls))
+        # Group into contiguous ranges
+        ranges = []
+        range_start = sorted_measures[0]
+        range_end = sorted_measures[0]
         
+        for measure in sorted_measures[1:]:
+            if measure == range_end + 1:
+                range_end = measure
+            else:
+                ranges.append((range_start, range_end + 1, controls))
+                range_start = measure
+                range_end = measure
+        
+        ranges.append((range_start, range_end + 1, controls))
         bar_mode["bars"][track_idx] = ranges
         
         if debug:
@@ -195,34 +199,163 @@ def build_track_specific_bar_mode_with_controls(S, measures_to_generate, extra_i
     return bar_mode
 
 
+def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_to_generate, 
+                                          extra_id_to_measure, input_ticks_per_beat=None, 
+                                          input_time_signature=None):
+    """Convert generated MIDI back to CA format with proper timing"""
+    if DEBUG:
+        print(f"\n=== CA FORMAT CONVERSION ===")
+        print(f"  MIDI: {midi_path}")
+        print(f"  Measures to generate: {sorted(measures_to_generate)}")
+    
+    midi_file = mido.MidiFile(midi_path)
+    output_ticks_per_beat = midi_file.ticks_per_beat
+    
+    output_time_sig_num = 4
+    output_time_sig_denom = 4
+    for track in midi_file.tracks:
+        for msg in track:
+            if msg.type == 'time_signature':
+                output_time_sig_num = msg.numerator
+                output_time_sig_denom = msg.denominator
+                break
+        if output_time_sig_num != 4:
+            break
+    
+    if input_ticks_per_beat and input_time_signature:
+        ticks_per_beat = input_ticks_per_beat
+        time_sig_num, time_sig_denom = input_time_signature
+    else:
+        ticks_per_beat = output_ticks_per_beat
+        time_sig_num = output_time_sig_num
+        time_sig_denom = output_time_sig_denom
+    
+    timing_ratio = 1.0
+    if input_ticks_per_beat and output_ticks_per_beat != input_ticks_per_beat:
+        timing_ratio = input_ticks_per_beat / output_ticks_per_beat
+        if DEBUG:
+            print(f"  Timing conversion: {output_ticks_per_beat} → {input_ticks_per_beat} (ratio {timing_ratio})")
+    
+    beats_per_measure = time_sig_num * (4.0 / time_sig_denom)
+    measure_length = int(ticks_per_beat * beats_per_measure)
+    
+    all_notes = []
+    for track_idx, track in enumerate(midi_file.tracks):
+        current_time = 0
+        active_notes = {}
+        
+        for msg in track:
+            current_time += msg.time
+            
+            if msg.type == 'note_on' and msg.velocity > 0:
+                active_notes[msg.note] = {'start': current_time, 'velocity': msg.velocity}
+            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                if msg.note in active_notes:
+                    note_start = active_notes[msg.note]['start']
+                    note_duration = current_time - note_start
+                    
+                    converted_start = int(note_start * timing_ratio)
+                    converted_duration = int(note_duration * timing_ratio)
+                    
+                    all_notes.append({
+                        'pitch': msg.note,
+                        'start': converted_start,
+                        'duration': converted_duration,
+                        'velocity': active_notes[msg.note]['velocity']
+                    })
+                    del active_notes[msg.note]
+    
+    if DEBUG:
+        print(f"  Extracted {len(all_notes)} notes from MIDI")
+    
+    notes_by_measure = {m: [] for m in measures_to_generate}
+    
+    for note in all_notes:
+        measure_idx = note['start'] // measure_length
+        if measure_idx in measures_to_generate:
+            position_in_measure = note['start'] - (measure_idx * measure_length)
+            notes_by_measure[measure_idx].append({
+                'pitch': note['pitch'],
+                'position': position_in_measure,
+                'duration': note['duration'],
+                'velocity': note['velocity']
+            })
+    
+    measure_to_extra_id = {m: eid for eid, m in extra_id_to_measure.items()}
+    sections = []
+    
+    for measure in sorted(measures_to_generate):
+        notes = notes_by_measure[measure]
+        
+        if measure not in measure_to_extra_id:
+            if DEBUG:
+                print(f"  Warning: measure {measure} has no extra_id mapping")
+            continue
+        
+        extra_id = measure_to_extra_id[measure]
+        notes.sort(key=lambda n: (n['position'], n['pitch']))
+        
+        note_tokens = []
+        last_position_in_measure = 0
+        
+        for note in notes:
+            position_in_measure = note['position']
+            wait = position_in_measure - last_position_in_measure
+            if wait > 0:
+                note_tokens.append(f"w:{int(wait)}")
+            
+            note_tokens.append(f"N:{note['pitch']}")
+            note_tokens.append(f"d:{int(note['duration'])}")
+            last_position_in_measure = position_in_measure
+        
+        section = f"<extra_id_{extra_id}>;" + ';'.join(note_tokens)
+        sections.append(section)
+    
+    result = ';' + ';'.join(sections)
+    
+    if DEBUG:
+        print(f"  Generated CA format: {len(result)} chars")
+        print(f"  Sections: {len(sections)}")
+    
+    return result
+
+
 def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_size,
                    has_fully_masked_inst, options_dict, track_options_dict, 
                    start_measure, end_measure):
-    """
-    MMM infill with track options control strings.
+    """MMM infill with track options control strings"""
+    global LAST_CALL, LAST_OUTPUTS
     
-    Args:
-        s: CA format string with extra_id tokens
-        S_encoded: Encoded MidiSongByMeasure
-        options_dict: Global options
-        track_options_dict: Per-track options with control strings
-        start_measure, end_measure: Selection range
-    """
+    if options_dict is None:
+        options_dict = {}
+    if track_options_dict is None:
+        track_options_dict = {}
+    
+    temperature = options_dict.get('temperature', 1.0)
+    model_dim = options_dict.get('model_dim', 4)
+    sampling_seed = options_dict.get('sampling_seed', -1)
+    
+    if temperature < 0.5:
+        temperature = 0.5
+    elif temperature > 2.0:
+        temperature = 2.0
     
     if not MMM_AVAILABLE or MODEL is None or TOKENIZER is None:
+        if DEBUG:
+            print("MMM not available, returning fallback")
         return ";<extra_id_0>"
     
     try:
         S = pre.midisongbymeasure_from_save_dict(S_encoded)
-        
         extra_ids = [int(m) for m in re.findall(r'<extra_id_(\d+)>', s)]
+        actual_extra_id = extra_ids[0] if extra_ids else 0
         
         if DEBUG:
             print(f"\n=== MMM INFILL CALL ===")
             print(f"  Extra IDs: {extra_ids}")
             print(f"  Project: {S.get_n_measures()} measures, {len(S.tracks)} tracks")
             print(f"  Selection: measures {start_measure}-{end_measure}")
-            print(f"  Temperature: {options_dict.get('temperature', 1.0)}")
+            print(f"  Temperature: {temperature}")
             print(f"  Track options: {len(track_options_dict)} tracks configured")
             for track_idx_str, opts in track_options_dict.items():
                 controls = opts.get('controls', [])
@@ -236,18 +369,24 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
         if not measures_to_generate:
             if DEBUG:
                 print("  No measures to generate")
-            return f";<extra_id_{extra_ids[0] if extra_ids else 0}>"
+            return f";<extra_id_{actual_extra_id}>"
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
         S.dump(filename=temp_midi_path)
         
-        score_obj = Score(temp_midi_path)
+        input_midi = mido.MidiFile(temp_midi_path)
+        input_ticks_per_beat = input_midi.ticks_per_beat
+        input_time_sig = (4, 4)
+        for track in input_midi.tracks:
+            for msg in track:
+                if msg.type == 'time_signature':
+                    input_time_sig = (msg.numerator, msg.denominator)
+                    break
         
-        model_dim = options_dict.get('model_dim', 4)
+        score_obj = Score(temp_midi_path)
         context_length = model_dim
         
-        # Build bar mode WITH control strings
         bar_mode = build_track_specific_bar_mode_with_controls(
             S, measures_to_generate, extra_id_to_measure, extra_id_to_track,
             track_options_dict, debug=DEBUG
@@ -267,8 +406,6 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             
             prompt_cfg = PromptConfig(bar_mode, context_length=context_length)
         
-        # Apply per-track temperature if specified
-        temperature = options_dict.get('temperature', 1.0)
         for track_idx_str, opts in track_options_dict.items():
             track_temp = opts.get('temperature', -1.0)
             if track_temp > 0:
@@ -288,7 +425,6 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             top_p=1.0,
         )
         
-        sampling_seed = options_dict.get('sampling_seed', -1)
         engine = SamplingEngine(gen_cfg, TOKENIZER, seed=sampling_seed, verbose=DEBUG)
         
         if DEBUG:
@@ -309,23 +445,45 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             result_midi_path = tmp.name
         generated_score.save(result_midi_path)
         
-        # Convert back to CA format
-        result_midi = mido.MidiFile(result_midi_path)
-        result_song = pre.import_midi_file_to_midisongbymeasure(result_midi_path)
+        if not os.path.exists(result_midi_path):
+            if DEBUG:
+                print("ERROR: Generated MIDI file does not exist")
+            raise FileNotFoundError("Generated MIDI file not created")
         
-        # Build CA string with proper extra_id placement
-        ca_output = pre.midisongbymeasure_to_ca_string(
-            result_song, 
+        file_size = os.path.getsize(result_midi_path)
+        if file_size == 0:
+            if DEBUG:
+                print("ERROR: Generated MIDI file is empty")
+            raise ValueError("Generated MIDI file is empty")
+        
+        if DEBUG:
+            print(f"  File size: {file_size} bytes")
+        
+        project_measures = list(range(S.get_n_measures()))
+        ca_result = convert_midi_to_ca_format_with_timing(
+            result_midi_path,
+            project_measures,
+            measures_to_generate,
             extra_id_to_measure,
-            extra_id_to_track
+            input_ticks_per_beat=input_ticks_per_beat,
+            input_time_signature=input_time_sig
         )
+        
+        try:
+            os.unlink(temp_midi_path)
+            os.unlink(result_midi_path)
+        except:
+            pass
+        
+        LAST_CALL = s
+        LAST_OUTPUTS.add(ca_result)
         
         if DEBUG:
             print(f"\n=== GENERATION COMPLETE ===")
-            print(f"  Output length: {len(ca_output)} chars")
-            print(f"  Preview: {ca_output[:200]}")
+            print(f"  Output length: {len(ca_result)} chars")
+            print(f"  Preview: {ca_result[:200]}")
         
-        return ca_output
+        return ca_result
         
     except Exception as e:
         if DEBUG:
@@ -333,7 +491,9 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             print(f"  {e}")
             import traceback
             traceback.print_exc()
-        return f";<extra_id_0>"
+        
+        fallback_extra_id = actual_extra_id if 'actual_extra_id' in locals() else 0
+        return f";<extra_id_{fallback_extra_id}>"
 
 
 def main():

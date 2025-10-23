@@ -32,7 +32,7 @@ try:
 except ImportError as e:
     print(f"Warning: Could not import REAPER modules: {e}")
 
-# Polyphony quantile mapping (matches MMM expectations)
+# Polyphony quantile mapping
 POLYPHONY_MAP = {
     0: 'POLYPHONY_ANY',
     1: 'POLYPHONY_0_1',
@@ -97,34 +97,6 @@ TRACK_TYPE_MAP = {
     12: 'STANDARD_BOTH'
 }
 
-# Density to horizontal density bin mapping (approximate)
-# Density 0-18 maps to HORIZ_0 through HORIZ_5 bins
-# HORIZ bins: 0=<half notes, 1=half-quarter, 2=quarter-8th, 3=8th-16th, 4=16th-4.5, 5=4.5+
-DENSITY_TO_HORIZ_MAP = {
-    0: 0, 1: 0, 2: 1,  # Very sparse
-    3: 1, 4: 1, 5: 2,  # Sparse
-    6: 2, 7: 2, 8: 3,  # Moderate
-    9: 3, 10: 3, 11: 3,  # Moderate-dense
-    12: 4, 13: 4, 14: 4,  # Dense
-    15: 5, 16: 5, 17: 5, 18: 5  # Very dense
-}
-
-# Polyphony quantile to vertical density bin mapping
-# Min/max quantiles affect polyphony range
-# VERT bins: 0=mono, 1=1.01-2, 2=2.01-3, 3=3.01-4, 4=4+ notes
-POLYPHONY_Q_TO_VERT_MAP = {
-    0: -1,  # Any - no constraint
-    1: 0,   # 0-1 notes = mono
-    2: 1,   # 1-2 notes
-    3: 2,   # 2-3 notes
-    4: 2,   # 3-4 notes
-    5: 3,   # 4-5 notes
-    6: 3,   # 5-6 notes
-    7: 4,   # 6-7 notes
-    8: 4,   # 7-8 notes
-    9: 4    # 8+ notes
-}
-
 def _locate_infiller_global_options_FX_loc() -> int:
     from reaper_python import RPR_GetMasterTrack, RPR_TrackFX_GetEnabled, RPR_TrackFX_GetParam
     tr = RPR_GetMasterTrack(-1)
@@ -183,43 +155,61 @@ def get_global_options():
         loc_offset = 1
         
         # Read parameters (same as before)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 0 + loc_offset, 0, 0)
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.temperature = val
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 1 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.tracks_per_step = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 2 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.bars_per_step = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 3 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.model_dim = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 4 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.percentage = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 5 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.max_steps = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 6 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.batch_size = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 7 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.shuffle = bool(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 8 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.sampling_seed = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 9 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.mask_top_k = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 10 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.polyphony_hard_limit = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 11 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.rhy_cond = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 12 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.do_note_range_cond = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 13 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.enc_no_repeat_ngram_size = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 14 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.variation_alg = int(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 15 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.disp_tr_to_midi_inst = bool(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 16 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.gen_notes_are_selected = bool(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 17 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.display_warnings = bool(val)
-        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, 18 + loc_offset, 0, 0)
+        loc_offset += 1
+        val, _, _, _, _, _ = RPR_TrackFX_GetParam(master, fx_loc, loc_offset, 0, 0)
         options.verbose = bool(val)
     
     except Exception as e:
@@ -233,7 +223,7 @@ class MMMTrackOptionsObj:
     """Track options object with streamlined parameters"""
     def __init__(self):
         self.track_temperature = -1.0
-        self.instrument = 0
+        self.instrument = -1
         self.density = 10
         self.track_type = 10
         self.min_polyphony_q = 0
@@ -258,19 +248,28 @@ def get_mmm_track_options_by_track_idx() -> dict:
                 opts = MMMTrackOptionsObj()
                 loc_offset = 1
                 
-                opts.track_temperature = RPR_TrackFX_GetParam(t, fx_loc, 0 + loc_offset, 0, 0)[0]
-                opts.instrument = int(RPR_TrackFX_GetParam(t, fx_loc, 1 + loc_offset, 0, 0)[0])
-                opts.density = int(RPR_TrackFX_GetParam(t, fx_loc, 2 + loc_offset, 0, 0)[0])
-                opts.track_type = int(RPR_TrackFX_GetParam(t, fx_loc, 3 + loc_offset, 0, 0)[0])
-                opts.min_polyphony_q = int(RPR_TrackFX_GetParam(t, fx_loc, 4 + loc_offset, 0, 0)[0])
-                opts.max_polyphony_q = int(RPR_TrackFX_GetParam(t, fx_loc, 5 + loc_offset, 0, 0)[0])
-                opts.polyphony_hard_limit = int(RPR_TrackFX_GetParam(t, fx_loc, 6 + loc_offset, 0, 0)[0])
+                # opts.track_temperature = RPR_TrackFX_GetParam(t, fx_loc, 0 + loc_offset, 0, 0)[0]
+                opts.instrument = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0]) - 1
+                loc_offset += 1
+                opts.min_polyphony = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.max_polyphony = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.density = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_whole = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_half = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_quarter = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_eight = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_sixteenth = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
+                loc_offset += 1
+                opts.note_dur_thirtysecond = int(RPR_TrackFX_GetParam(t, fx_loc, loc_offset, 0, 0)[0])
                 
                 res[i] = opts
-                
-                if DEBUG:
-                    print(f"Track {i}: inst={INSTRUMENT_MAP.get(opts.instrument, 'unknown')}, "
-                          f"density={opts.density}, polyphony_q={opts.min_polyphony_q}-{opts.max_polyphony_q}")
         
     except Exception as e:
         if DEBUG:
@@ -281,47 +280,39 @@ def get_mmm_track_options_by_track_idx() -> dict:
 
 def convert_track_options_to_control_strings(opts: MMMTrackOptionsObj) -> list:
     """
-    Convert streamlined track options to MMM attribute control strings.
-    
-    Control string format matches MMM tokenizer expectations:
-    - INST_{program} for instrument (0-128)
-    - DENS_{level} for density (0-18)
-    - HORIZ_{bin} for horizontal density approximation (0-5)
-    - VERT_{bin} for vertical/polyphony density (0-4)
-    - POLY_{quantile} for polyphony constraints
+    Convert track options to MMM attribute control strings.
     """
     controls = []
     
     # Instrument control
     if opts.instrument >= 0:
-        inst_name = INSTRUMENT_MAP.get(opts.instrument, f'instrument_{opts.instrument}')
-        controls.append(f"INST_{opts.instrument}")
+        controls.append(f"Program_{opts.instrument}")
+
+    # Polyphony controls
+    if opts.min_polyphony > 0:
+        controls.append(f"ACBarOnsetPolyphonyMin_{opts.min_polyphony}")
+    if opts.max_polyphony > 0:
+        controls.append(f"ACBarOnsetPolyphonyMax_{opts.max_polyphony}")
     
     # Density control - map to horizontal density bins
-    if opts.density >= 0:
-        horiz_bin = DENSITY_TO_HORIZ_MAP.get(opts.density, 3)
-        controls.append(f"DENS_{opts.density}")
-        controls.append(f"HORIZ_{horiz_bin}")
+    if opts.density == 18:
+        controls.append(f"ACBarNoteDensity_18+")
+    elif opts.density >= 0:
+        controls.append(f"ACBarNoteDensity_{opts.density}")
     
-    # Polyphony controls - use min/max to determine vertical density
-    if opts.min_polyphony_q > 0 or opts.max_polyphony_q > 0:
-        # Use max polyphony to set vertical density target
-        target_q = opts.max_polyphony_q if opts.max_polyphony_q > 0 else opts.min_polyphony_q
-        vert_bin = POLYPHONY_Q_TO_VERT_MAP.get(target_q, -1)
-        
-        if vert_bin >= 0:
-            controls.append(f"VERT_{vert_bin}")
-        
-        # Add explicit polyphony quantile controls
-        if opts.min_polyphony_q > 0:
-            controls.append(f"POLY_MIN_{opts.min_polyphony_q}")
-        if opts.max_polyphony_q > 0:
-            controls.append(f"POLY_MAX_{opts.max_polyphony_q}")
-    
-    # Track type control
-    if opts.track_type >= 8:
-        track_type_name = TRACK_TYPE_MAP.get(opts.track_type, 'STANDARD_TRACK')
-        controls.append(f"TRACK_TYPE_{opts.track_type}")
+    # Note duration
+    if opts.note_dur_whole >= 0:
+        controls.append(f"ACBarNoteDurationWhole_{opts.note_dur_whole}")
+    if opts.note_dur_half >= 0:
+        controls.append(f"ACBarNoteDurationHalf_{opts.note_dur_half}")
+    if opts.note_dur_quarter >= 0:
+        controls.append(f"ACBarNoteDurationQuarter_{opts.note_dur_quarter}")
+    if opts.note_dur_eight >= 0:
+        controls.append(f"ACBarNoteDurationEight_{opts.note_dur_eight}")
+    if opts.note_dur_sixteenth >= 0:
+        controls.append(f"ACBarNoteDurationSixteenth_{opts.note_dur_sixteenth}")
+    if opts.note_dur_thirtysecond >= 0:
+        controls.append(f"ACBarNoteDurationThirtySecond_{opts.note_dur_thirtysecond}")
     
     if DEBUG and controls:
         print(f"  Generated controls: {controls}")
@@ -368,13 +359,6 @@ def call_nn_infill(s, S, use_sampling=True, min_length=10, enc_no_repeat_ngram_s
         track_options_dict = {}
         for idx, opts in track_options.items():
             track_options_dict[str(idx)] = {
-                'temperature': opts.track_temperature,
-                'instrument': opts.instrument,
-                'density': opts.density,
-                'track_type': opts.track_type,
-                'min_polyphony_q': opts.min_polyphony_q,
-                'max_polyphony_q': opts.max_polyphony_q,
-                'polyphony_hard_limit': opts.polyphony_hard_limit,
                 'controls': convert_track_options_to_control_strings(opts)
             }
         
