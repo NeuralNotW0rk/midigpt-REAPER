@@ -1,6 +1,6 @@
 """
-MMM Server with Track Options Control String Integration
-Fixed: Uses MidiSong for all MIDI operations, removes mido redundancy
+MMM Server with Context Window Filtering
+Critical Fix: Only send context window measures to MMM, not entire project
 """
 
 import sys
@@ -14,20 +14,17 @@ PORT = 3456
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../src/Scripts/composers_assistant_v2'))
 import preprocessing_functions as pre
-from midisong import MidiSong
+from midisong import MidiSong, MidiSongByMeasure
 
 MMM_AVAILABLE = False
 MODEL = None
 TOKENIZER = None
-LAST_CALL = None
-LAST_OUTPUTS = set()
 
 try:
     from mmm import Model, Tokenizer, PromptConfig, SamplingEngine, GenerationConfig, Score, generate, ModelConfig
     MMM_AVAILABLE = True
     print("MMM library loaded successfully")
     
-    # Control MMM logging globally
     if DEBUG:
         try:
             from mmm import set_log_level, LogLevel
@@ -71,6 +68,178 @@ def initialize_mmm():
         return False
 
 
+def filter_midisongbymeasure_to_range(S, start_measure, end_measure, debug=False):
+    """
+    Create a new MidiSongByMeasure containing only measures in [start_measure, end_measure].
+    This ensures MMM only receives the context window, not the entire project.
+    
+    Strategy:
+    1. Convert full MidiSongByMeasure to MidiSong (joins note_ons/note_offs)
+    2. Filter notes/events by time range
+    3. Convert back to MidiSongByMeasure with adjusted measure_endpoints
+    
+    Args:
+        S: MidiSongByMeasure object
+        start_measure: First measure to include (inclusive)
+        end_measure: Last measure to include (inclusive)
+        debug: Print debug information
+    
+    Returns:
+        Filtered MidiSongByMeasure with only the specified measure range
+    """
+    if debug:
+        print(f"\n=== FILTERING CONTEXT WINDOW ===")
+        print(f"  Original project: {S.get_n_measures()} measures")
+        print(f"  Filtering to: measures {start_measure}-{end_measure}")
+    
+    # Get original measure endpoints
+    original_endpoints = S.get_measure_endpoints(make_copy=True)
+    
+    # Calculate time range for filtering
+    start_tick = original_endpoints[start_measure]
+    end_tick = original_endpoints[end_measure + 1]
+    
+    if debug:
+        print(f"  Time range: ticks {start_tick}-{end_tick}")
+    
+    # Convert to MidiSong (this properly handles note_on/note_off pairing)
+    midi_song = MidiSong.from_MidiSongByMeasure(S, consume_calling_song=False)
+    
+    # Filter each track to only include events in the time range
+    filtered_tracks = []
+    for track in midi_song.tracks:
+        # Create new filtered track (is_drum is set automatically by inst property)
+        from midisong import Track, Note
+        filtered_track = Track(inst=track.inst, name=track.name if hasattr(track, 'name') else "")
+        
+        # Calculate the adjusted end boundary (last measure endpoint in filtered context)
+        adjusted_end_tick = end_tick - start_tick
+        
+        # Filter notes to time range and adjust timing
+        notes_included = 0
+        notes_excluded = 0
+        for note in track.notes:
+            note_start = note.click
+            note_end = note.end
+            
+            # Only include notes that START before end_tick and END after start_tick
+            if note_end > start_tick and note_start < end_tick:
+                # Clip note to time range boundaries
+                clipped_start = max(note_start, start_tick)
+                clipped_end = min(note_end, end_tick)
+                
+                # Adjust timing relative to start_tick
+                adjusted_start = clipped_start - start_tick
+                adjusted_end = clipped_end - start_tick
+                
+                # CRITICAL: Exclude notes that would end exactly at or beyond the last measure endpoint
+                # This prevents index errors when converting back to MidiSongByMeasure
+                if adjusted_end >= adjusted_end_tick:
+                    notes_excluded += 1
+                    continue
+                
+                # Also skip notes that would start at or beyond the boundary
+                if adjusted_start >= adjusted_end_tick:
+                    notes_excluded += 1
+                    continue
+                
+                adjusted_note = Note(
+                    pitch=note.pitch,
+                    vel=note.vel,
+                    click=adjusted_start,
+                    end=adjusted_end
+                )
+                filtered_track.notes.append(adjusted_note)
+                notes_included += 1
+            else:
+                notes_excluded += 1
+        
+        if debug and (notes_included > 0 or notes_excluded > 0):
+            print(f"  Track {track.inst}: {notes_included} notes included, {notes_excluded} notes excluded")
+        
+        # Filter control changes (if any)
+        if hasattr(track, 'control_changes') and track.control_changes:
+            for cc in track.control_changes:
+                adjusted_cc_time = cc.click - start_tick
+                if 0 <= adjusted_cc_time < adjusted_end_tick:
+                    from midisong import ControlChange
+                    adjusted_cc = ControlChange(
+                        controller=cc.controller,
+                        val=cc.val,
+                        click=adjusted_cc_time
+                    )
+                    filtered_track.control_changes.append(adjusted_cc)
+        
+        filtered_tracks.append(filtered_track)
+    
+    # Filter time signatures to only those within the time range
+    filtered_time_sigs = []
+    for ts in midi_song.time_signatures:
+        if start_tick <= ts.click < end_tick:
+            from midisong import TimeSig
+            adjusted_ts = TimeSig(
+                num=ts.num,
+                denom=ts.denom,
+                click=ts.click - start_tick
+            )
+            filtered_time_sigs.append(adjusted_ts)
+    
+    # If no time signatures in range, add a default 4/4 at the start
+    if not filtered_time_sigs:
+        from midisong import TimeSig
+        filtered_time_sigs = [TimeSig(num=4, denom=4, click=0)]
+    
+    # Filter tempo changes to only those within the time range
+    filtered_tempo_changes = []
+    for tc in midi_song.tempo_changes:
+        if start_tick <= tc.click < end_tick:
+            from midisong import TempoChange
+            adjusted_tc = TempoChange(
+                val=tc.val,
+                click=tc.click - start_tick
+            )
+            filtered_tempo_changes.append(adjusted_tc)
+    
+    # If no tempo changes in range, add a default 120 BPM at the start
+    if not filtered_tempo_changes:
+        from midisong import TempoChange
+        filtered_tempo_changes = [TempoChange(val=120, click=0)]
+    
+    # Create filtered MidiSong with adjusted timing
+    filtered_midi_song = MidiSong(
+        tracks=filtered_tracks,
+        time_signatures=filtered_time_sigs,
+        markers=[],
+        cpq=midi_song.cpq,
+        tempo_changes=filtered_tempo_changes,
+        clean_up_time_signatures=False
+    )
+    
+    # Calculate adjusted measure_endpoints (starting from 0)
+    filtered_endpoints_raw = original_endpoints[start_measure:end_measure + 2]
+    offset = filtered_endpoints_raw[0]
+    filtered_endpoints = [ep - offset for ep in filtered_endpoints_raw]
+    
+    if debug:
+        print(f"  Filtered endpoints: {filtered_endpoints}")
+        print(f"  Offset applied: {offset}")
+        print(f"  Time signatures: {len(filtered_time_sigs)} found")
+        print(f"  Tempo changes: {len(filtered_tempo_changes)} found")
+    
+    # Convert back to MidiSongByMeasure with the filtered measure_endpoints
+    filtered_S = MidiSongByMeasure.from_MidiSong(
+        filtered_midi_song,
+        measure_endpoints=filtered_endpoints,
+        consume_calling_song=True
+    )
+    
+    if debug:
+        print(f"  Filtered result: {filtered_S.get_n_measures()} measures")
+        print(f"  Filtered tracks: {len(filtered_S.tracks)}")
+    
+    return filtered_S
+
+
 def parse_measures_with_extra_ids(s, start_measure, end_measure, debug=False):
     """Parse CA string to find measures and tracks with extra_ids"""
     marked_measures = set()
@@ -84,30 +253,29 @@ def parse_measures_with_extra_ids(s, start_measure, end_measure, debug=False):
     if not measure_starts:
         return marked_measures, extra_id_to_measure, extra_id_to_track
     
+    if debug:
+        print(f"  Found {len(measure_starts)} measure markers in CA string")
+    
+    measure_sections = []
     for i in range(len(measure_starts)):
         section_start = measure_starts[i]
         section_end = measure_starts[i + 1] if i + 1 < len(measure_starts) else len(s)
         section_text = s[section_start:section_end]
-        
-        extra_id_match = re.search(r'<extra_id_(\d+)>', section_text)
-        if not extra_id_match:
-            continue
-        
-        extra_id = int(extra_id_match.group(1))
-        track_match = re.search(r';I:(\d+)', section_text)
-        track_idx = int(track_match.group(1)) if track_match else 0
-        
-        project_measure = start_measure + i
+        measure_sections.append(section_text)
+    
+    for section_idx, section_text in enumerate(measure_sections):
+        project_measure = start_measure + section_idx
         
         if project_measure > end_measure:
             break
         
-        marked_measures.add(project_measure)
-        extra_id_to_measure[extra_id] = project_measure
-        extra_id_to_track[extra_id] = track_idx
-        
-        if debug:
-            print(f"    Measure {project_measure}, Track {track_idx}: extra_id_{extra_id}")
+        extra_ids = re.findall(r'<extra_id_(\d+)>', section_text)
+        if extra_ids:
+            marked_measures.add(project_measure)
+            for extra_id_num in extra_ids:
+                extra_id_to_measure[int(extra_id_num)] = project_measure
+            if debug:
+                print(f"    Measure {project_measure}, Track 24: extra_id_{extra_ids[0]}")
     
     return marked_measures, extra_id_to_measure, extra_id_to_track
 
@@ -118,216 +286,37 @@ def detect_measures_to_generate(S, s, start_measure, end_measure, has_extra_ids,
     extra_id_to_measure = {}
     extra_id_to_track = {}
     
-    if start_measure is None or end_measure is None:
-        return measures_to_generate, extra_id_to_measure, extra_id_to_track
-    
     if has_extra_ids:
         marked_measures, extra_id_to_measure, extra_id_to_track = parse_measures_with_extra_ids(
             s, start_measure, end_measure, debug
         )
-        measures_to_generate = marked_measures
+        measures_to_generate.update(marked_measures)
+    
+    empty_measures = set()
+    for measure_idx in range(start_measure, end_measure + 1):
+        is_empty = True
+        for track in S.tracks:
+            if measure_idx < len(track.tracks_by_measure):
+                measure_track = track.tracks_by_measure[measure_idx]
+                if hasattr(measure_track, 'note_ons') and measure_track.note_ons:
+                    is_empty = False
+                    break
+        if is_empty:
+            empty_measures.add(measure_idx)
+    
+    measures_to_generate.update(empty_measures)
     
     return measures_to_generate, extra_id_to_measure, extra_id_to_track
 
 
-def build_track_specific_bar_mode_with_controls(S, measures_to_generate, extra_id_to_measure, 
-                                                  extra_id_to_track, track_options, debug=False):
-    """Build bar_mode with track-specific infill ranges AND control strings"""
-    bar_mode = {"bars": {}}
-    
-    if not measures_to_generate:
-        return bar_mode
-    
-    measure_to_extra_id = {v: k for k, v in extra_id_to_measure.items()}
-    track_to_measures = {}
-    
-    for track_idx, track in enumerate(S.tracks):
-        track_measures = []
-        for measure_idx in measures_to_generate:
-            has_extra_id_for_this_track = (
-                measure_idx in measure_to_extra_id and
-                extra_id_to_track.get(measure_to_extra_id[measure_idx]) == track_idx
-            )
-            
-            is_empty = False
-            if measure_idx >= len(track.tracks_by_measure):
-                is_empty = True
-            else:
-                measure_track = track.tracks_by_measure[measure_idx]
-                if not (hasattr(measure_track, 'note_ons') and measure_track.note_ons):
-                    is_empty = True
-            
-            if is_empty or has_extra_id_for_this_track:
-                track_measures.append(measure_idx)
-                if debug and has_extra_id_for_this_track and not is_empty:
-                    print(f"    Track {track_idx}, Measure {measure_idx}: regenerating existing content")
-        
-        if track_measures:
-            track_to_measures[track_idx] = track_measures
-    
-    if debug:
-        print(f"  Track-to-measures mapping:")
-        for track_idx, measures in sorted(track_to_measures.items()):
-            print(f"    Track {track_idx}: {sorted(measures)}")
-    
-    for track_idx, track_measures in track_to_measures.items():
-        if not track_measures:
-            continue
-        
-        sorted_measures = sorted(track_measures)
-        
-        # Get control strings for this track
-        controls = []
-        track_key = str(track_idx)
-        if track_key in track_options:
-            controls = track_options[track_key].get('controls', [])
-        elif track_idx in track_options:
-            controls = track_options[track_idx].get('controls', [])
-        
-        # Group into contiguous ranges
-        ranges = []
-        range_start = sorted_measures[0]
-        range_end = sorted_measures[0]
-        
-        for measure in sorted_measures[1:]:
-            if measure == range_end + 1:
-                range_end = measure
-            else:
-                ranges.append((range_start, range_end + 1, controls))
-                range_start = measure
-                range_end = measure
-        
-        ranges.append((range_start, range_end + 1, controls))
-        bar_mode["bars"][track_idx] = ranges
-        
-        if debug:
-            print(f"  Track {track_idx}: {len(ranges)} range(s), controls={controls}")
-    
-    return bar_mode
-
-
-def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_to_generate, 
-                                          extra_id_to_measure, input_ticks_per_beat=None, 
-                                          input_time_signature=None):
-    """Convert generated MIDI back to CA format with proper timing"""
-    if DEBUG:
-        print(f"\n=== CA FORMAT CONVERSION ===")
-        print(f"  MIDI: {midi_path}")
-        print(f"  Measures to generate: {sorted(measures_to_generate)}")
-    
-    # Use MidiSong to read the generated MIDI
-    generated_song = MidiSong.from_midi_file(midi_path)
-    output_ticks_per_beat = generated_song.cpq
-    
-    # Get time signature from the song
-    output_time_sig_num = 4
-    output_time_sig_denom = 4
-    if generated_song.time_signatures:
-        output_time_sig_num = generated_song.time_signatures[0].num
-        output_time_sig_denom = generated_song.time_signatures[0].denom
-    
-    # Use input timing if provided, otherwise use output timing
-    if input_ticks_per_beat and input_time_signature:
-        ticks_per_beat = input_ticks_per_beat
-        time_sig_num, time_sig_denom = input_time_signature
-    else:
-        ticks_per_beat = output_ticks_per_beat
-        time_sig_num = output_time_sig_num
-        time_sig_denom = output_time_sig_denom
-    
-    # Calculate timing conversion ratio
-    timing_ratio = 1.0
-    if input_ticks_per_beat and output_ticks_per_beat != input_ticks_per_beat:
-        timing_ratio = input_ticks_per_beat / output_ticks_per_beat
-        if DEBUG:
-            print(f"  Timing conversion: {output_ticks_per_beat} → {input_ticks_per_beat} (ratio {timing_ratio})")
-    
-    # Calculate measure length
-    beats_per_measure = time_sig_num * (4.0 / time_sig_denom)
-    measure_length = int(ticks_per_beat * beats_per_measure)
-    
-    if DEBUG:
-        print(f"  Timing: {ticks_per_beat} ticks/beat, {time_sig_num}/{time_sig_denom}")
-        print(f"  Measure length: {measure_length} ticks")
-    
-    # Extract all notes from all tracks
-    all_notes = []
-    for track in generated_song.tracks:
-        for note in track.notes:
-            # Apply timing conversion
-            converted_start = int(note.click * timing_ratio)
-            converted_duration = int((note.end - note.click) * timing_ratio)
-            
-            all_notes.append({
-                'pitch': note.pitch,
-                'start': converted_start,
-                'duration': converted_duration,
-                'velocity': note.vel
-            })
-    
-    if DEBUG:
-        print(f"  Extracted {len(all_notes)} notes from MIDI")
-    
-    # Organize notes by measure
-    notes_by_measure = {m: [] for m in measures_to_generate}
-    
-    for note in all_notes:
-        measure_idx = note['start'] // measure_length
-        
-        if measure_idx in measures_to_generate:
-            position_in_measure = note['start'] - (measure_idx * measure_length)
-            notes_by_measure[measure_idx].append({
-                'pitch': note['pitch'],
-                'position': position_in_measure,
-                'duration': note['duration'],
-                'velocity': note['velocity']
-            })
-    
-    # Build CA format output
-    measure_to_extra_id = {m: eid for eid, m in extra_id_to_measure.items()}
-    
-    sections = []
-    for measure in sorted(measures_to_generate):
-        notes = notes_by_measure[measure]
-        
-        if measure not in measure_to_extra_id:
-            if DEBUG:
-                print(f"  Warning: measure {measure} has no extra_id mapping, skipping")
-            continue
-        
-        extra_id = measure_to_extra_id[measure]
-        notes.sort(key=lambda n: (n['position'], n['pitch']))
-        
-        note_tokens = []
-        last_position_in_measure = 0
-        
-        for note in notes:
-            position_in_measure = note['position']
-            wait = position_in_measure - last_position_in_measure
-            if wait > 0:
-                note_tokens.append(f"w:{int(wait)}")
-            
-            note_tokens.append(f"N:{note['pitch']}")
-            note_tokens.append(f"d:{int(note['duration'])}")
-            last_position_in_measure = position_in_measure
-        
-        section = f"<extra_id_{extra_id}>;" + ';'.join(note_tokens)
-        sections.append(section)
-    
-    result = ';' + ';'.join(sections)
-    
-    if DEBUG:
-        print(f"  Generated CA format: {len(result)} chars")
-        print(f"  Sections: {len(sections)}")
-    
-    return result
-
-
-def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_size,
-                   has_fully_masked_inst, options_dict, track_options_dict, 
-                   start_measure, end_measure):
-    """MMM infill with track options control strings"""
-    global LAST_CALL, LAST_OUTPUTS
+def call_nn_infill(s, S_encoded, use_sampling=True, min_length=10, 
+                   enc_no_repeat_ngram_size=0, has_fully_masked_inst=False,
+                   options_dict=None, track_options_dict=None, 
+                   start_measure=None, end_measure=None):
+    """
+    MMM infill with context window filtering.
+    Only sends relevant measures to MMM instead of entire project.
+    """
     
     if options_dict is None:
         options_dict = {}
@@ -360,10 +349,6 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             print(f"  Selection: measures {start_measure}-{end_measure}")
             print(f"  Temperature: {temperature}")
             print(f"  Track options: {len(track_options_dict)} tracks configured")
-            for track_idx_str, opts in track_options_dict.items():
-                controls = opts.get('controls', [])
-                if controls:
-                    print(f"    Track {track_idx_str}: {controls}")
         
         measures_to_generate, extra_id_to_measure, extra_id_to_track = detect_measures_to_generate(
             S, s, start_measure, end_measure, bool(extra_ids), debug=DEBUG
@@ -374,17 +359,28 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
                 print("  No measures to generate")
             return f";<extra_id_{actual_extra_id}>"
         
-        # Create temporary MIDI file
+        # CRITICAL FIX: Filter S to only the context window before creating MIDI
+        filtered_S = filter_midisongbymeasure_to_range(S, start_measure, end_measure, debug=DEBUG)
+        
+        # Create temporary MIDI file from filtered context
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
         if DEBUG:
             temp_midi_path = os.path.join(os.path.dirname(__file__), 'test_in.mid')
         
-        # Convert MidiSongByMeasure to MidiSong and dump to preserve instruments
-        midi_song = MidiSong.from_MidiSongByMeasure(S, consume_calling_song=False)
+        # Convert filtered MidiSongByMeasure to MidiSong and dump
+        midi_song = MidiSong.from_MidiSongByMeasure(filtered_S, consume_calling_song=False)
         midi_song.dump(filename=temp_midi_path)
         
-        # Extract timing information from the converted MidiSong
+        if DEBUG:
+            # Verify the MIDI file structure
+            verify_midi = MidiSong.from_midi_file(temp_midi_path)
+            verify_S = MidiSongByMeasure.from_MidiSong(verify_midi)
+            print(f"  Dumped MIDI verification: {verify_S.get_n_measures()} measures")
+            if verify_S.get_n_measures() != (end_measure - start_measure + 1):
+                print(f"  WARNING: Expected {end_measure - start_measure + 1} measures but got {verify_S.get_n_measures()}")
+        
+        # Extract timing information
         input_ticks_per_beat = midi_song.cpq
         input_time_sig = (4, 4)
         if midi_song.time_signatures:
@@ -393,109 +389,134 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
         if DEBUG:
             print(f"  Input timing: {input_ticks_per_beat} ticks/beat, {input_time_sig[0]}/{input_time_sig[1]}")
         
-        score_obj = Score(temp_midi_path)
-        context_length = model_dim
-        
-        bar_mode = build_track_specific_bar_mode_with_controls(
-            S, measures_to_generate, extra_id_to_measure, extra_id_to_track,
-            track_options_dict, debug=DEBUG
-        )
-        
-        if not bar_mode["bars"]:
-            if DEBUG:
-                print("  No tracks configured for infilling")
-            prompt_cfg = PromptConfig({}, context_length=context_length)
-        else:
-            if DEBUG:
-                print(f"\n=== BAR MODE STRUCTURE ===")
-                for track_idx, ranges in bar_mode["bars"].items():
-                    print(f"  Track {track_idx}: {len(ranges)} range(s)")
-                    for start, end, controls in ranges:
-                        print(f"    [{start}, {end}): controls={controls}")
-            
-            prompt_cfg = PromptConfig(bar_mode, context_length=context_length)
-        
+        # Convert track options control strings to bar-mode format
+        track_to_measures = {}
         for track_idx_str, opts in track_options_dict.items():
-            track_temp = opts.get('temperature', -1.0)
-            if track_temp > 0:
-                temperature = track_temp
-                if DEBUG:
-                    print(f"  Using track {track_idx_str} temperature: {temperature}")
-                break
+            track_idx = int(track_idx_str)
+            controls = opts.get('controls', [])
+            
+            # Map measures_to_generate to bar indices in filtered context
+            measure_list = sorted(list(measures_to_generate))
+            track_to_measures[track_idx] = [(m - start_measure) for m in measure_list if start_measure <= m <= end_measure]
+            
+            if DEBUG and controls:
+                print(f"  Track {track_idx}: {len(measure_list)} range(s), controls={controls}")
         
-        gen_cfg = GenerationConfig(
-            do_sample=use_sampling,
+        if not track_to_measures:
+            track_to_measures[0] = [(m - start_measure) for m in sorted(measures_to_generate)]
+        
+        # Build bar mode structure
+        bar_mode = {"bars": {}}
+        for track_idx, measure_indices in track_to_measures.items():
+            if not measure_indices:
+                continue
+            
+            control_strings = []
+            if str(track_idx) in track_options_dict:
+                control_strings = track_options_dict[str(track_idx)].get('controls', [])
+            
+            # Group contiguous measures into ranges
+            ranges = []
+            start_idx = measure_indices[0]
+            for i in range(1, len(measure_indices)):
+                if measure_indices[i] != measure_indices[i-1] + 1:
+                    ranges.append((start_idx, measure_indices[i-1] + 1, control_strings))
+                    start_idx = measure_indices[i]
+            ranges.append((start_idx, measure_indices[-1] + 1, control_strings))
+            
+            bar_mode["bars"][track_idx] = ranges
+            
+            if DEBUG:
+                print(f"  Track {track_idx}: {len(ranges)} range(s), controls={control_strings}")
+        
+        if DEBUG:
+            print(f"\n=== BAR MODE STRUCTURE ===")
+            for track_idx, ranges in bar_mode["bars"].items():
+                print(f"  Track {track_idx}: {len(ranges)} range(s)")
+                for start_bar, end_bar, controls in ranges:
+                    print(f"    [{start_bar}, {end_bar}): controls={controls}")
+        
+        # Create prompt config
+        prompt_config = PromptConfig(bar_mode, context_length=model_dim)
+        
+        # Create generation config
+        gen_config = GenerationConfig(
+            do_sample=True,
             max_new_tokens=256,
             attempts=4,
-            pad_token_id=0,
             repetition_penalty=1.0,
             temperature=temperature,
-            top_p=1.0,
-            top_k=50
+            top_k=0,
+            top_p=1.0
         )
         
-        engine = SamplingEngine(gen_cfg, TOKENIZER, seed=sampling_seed)
+        # Create sampling engine
+        engine = SamplingEngine(gen_config, TOKENIZER, seed=sampling_seed)
         
         if DEBUG:
             print(f"\n=== STARTING GENERATION ===")
-            print(f"  Max tokens: {gen_cfg.max_new_tokens}")
-            print(f"  Context length: {prompt_cfg.context_length} bars")
+            print(f"  Max tokens: {gen_config.max_new_tokens}")
+            print(f"  Context length: {model_dim} bars")
         
+        # Generate with correct positional arguments
         generated_score = generate(
-            model=MODEL,
-            tokenizer=TOKENIZER,
-            prompt_config=prompt_cfg,
-            sampling_engine=engine,
-            score=score_obj
+            MODEL,                      # model
+            TOKENIZER,                  # tokenizer
+            prompt_config,              # prompt_config
+            engine,                     # sampling_engine
+            Score(temp_midi_path)       # score
         )
         
-        with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
-            result_midi_path = tmp.name
-        if DEBUG:
-            result_midi_path = os.path.join(os.path.dirname(__file__), 'test_out.mid')
-        
-        generated_score.save(result_midi_path)
-        
-        if not os.path.exists(result_midi_path):
-            if DEBUG:
-                print("ERROR: Generated MIDI file does not exist")
-            raise FileNotFoundError("Generated MIDI file not created")
-        
-        file_size = os.path.getsize(result_midi_path)
-        if file_size == 0:
-            if DEBUG:
-                print("ERROR: Generated MIDI file is empty")
-            raise ValueError("Generated MIDI file is empty")
-        
-        if DEBUG:
-            print(f"  File size: {file_size} bytes")
-        
-        project_measures = list(range(S.get_n_measures()))
-        ca_result = convert_midi_to_ca_format_with_timing(
-            result_midi_path,
-            project_measures,
-            measures_to_generate,
-            extra_id_to_measure,
-            input_ticks_per_beat=input_ticks_per_beat,
-            input_time_signature=input_time_sig
-        )
-        
-        try:
-            if not DEBUG:
-                os.unlink(temp_midi_path)
-                os.unlink(result_midi_path)
-        except:
-            pass
-        
-        LAST_CALL = s
-        LAST_OUTPUTS.add(ca_result)
+        # Save generated output
+        output_path = temp_midi_path.replace('test_in.mid', 'test_out.mid')
+        generated_score.save(output_path)
         
         if DEBUG:
             print(f"\n=== GENERATION COMPLETE ===")
-            print(f"  Output length: {len(ca_result)} chars")
-            print(f"  Preview: {ca_result[:200]}")
+            print(f"  Output saved to: {output_path}")
         
-        return ca_result
+        # Convert generated MIDI back to CA format
+        generated_midi_song = MidiSong.from_midi_file(output_path)
+        generated_S = MidiSongByMeasure.from_MidiSong(generated_midi_song)
+        
+        if DEBUG:
+            print(f"  Generated output: {generated_S.get_n_measures()} measures, {len(generated_S.tracks)} tracks")
+        
+        # Build CA format output with proper extra_id markers
+        ca_parts = []
+        for measure_idx in sorted(measures_to_generate):
+            # Map to filtered context indices
+            filtered_measure_idx = measure_idx - start_measure
+            
+            if filtered_measure_idx >= 0 and filtered_measure_idx < generated_S.get_n_measures():
+                # Add measure header
+                ca_parts.append(f";M:0;B:5;L:{input_ticks_per_beat * 4}")
+                
+                # Add extra_id for this measure
+                extra_id_for_measure = extra_id_to_measure.get(measure_idx, actual_extra_id)
+                ca_parts.append(f"<extra_id_{extra_id_for_measure}>")
+                
+                # Extract notes from generated measure
+                for track in generated_S.tracks:
+                    if filtered_measure_idx < len(track.tracks_by_measure):
+                        measure_track = track.tracks_by_measure[filtered_measure_idx]
+                        if hasattr(measure_track, 'note_ons') and measure_track.note_ons:
+                            # Add notes with timing
+                            last_time = 0
+                            for note_on in sorted(measure_track.note_ons, key=lambda n: n.click):
+                                wait = note_on.click - last_time
+                                if wait > 0:
+                                    ca_parts.append(f"w:{wait}")
+                                ca_parts.append(f"N:{note_on.pitch}")
+                                ca_parts.append(f"d:{note_on.duration if hasattr(note_on, 'duration') else 24}")
+                                last_time = note_on.click
+        
+        result = ''.join(ca_parts)
+        
+        if DEBUG:
+            print(f"  Generated CA: {len(result)} chars")
+        
+        return result if result else f";<extra_id_{actual_extra_id}>"
         
     except Exception as e:
         if DEBUG:
@@ -503,30 +524,28 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             print(f"  {e}")
             import traceback
             traceback.print_exc()
-        
-        fallback_extra_id = actual_extra_id if 'actual_extra_id' in locals() else 0
-        return f";<extra_id_{fallback_extra_id}>"
+        raise
 
 
 def main():
-    if not initialize_mmm():
-        print("Failed to initialize MMM - server will not function")
-        return
+    """Start MMM server"""
+    if DEBUG:
+        print(f"\n=== MMM SERVER READY ===")
+        print(f"  Port: {PORT}")
+        print(f"  Debug: {DEBUG}")
+        print(f"  Track options support: ENABLED")
+        print(f"  Control strings: ENABLED")
+        print(f"  Context window filtering: ENABLED")
     
-    print(f"\n=== MMM SERVER READY ===")
-    print(f"  Port: {PORT}")
-    print(f"  Debug: {DEBUG}")
-    print(f"  Track options support: ENABLED")
-    print(f"  Control strings: ENABLED")
-    print("\nWaiting for requests...")
-    
-    server = SimpleXMLRPCServer(('127.0.0.1', PORT), allow_none=True, logRequests=False)
-    server.register_function(call_nn_infill, 'call_nn_infill')
-    
-    try:
+    if initialize_mmm():
+        server = SimpleXMLRPCServer(("localhost", PORT), allow_none=True, logRequests=DEBUG)
+        server.register_function(call_nn_infill, "call_nn_infill")
+        
+        print(f"\nWaiting for requests...")
         server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nShutting down server")
+    else:
+        print("Failed to initialize MMM. Exiting.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
