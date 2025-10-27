@@ -1,21 +1,20 @@
 """
 MMM Server with Track Options Control String Integration
-Merges working conversion logic with control string support
+Fixed: Uses MidiSong for all MIDI operations, removes mido redundancy
 """
 
 import sys
 import os
 import tempfile
 import re
-import json
 from xmlrpc.server import SimpleXMLRPCServer
-import mido
 
 DEBUG = True
 PORT = 3456
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../src/Scripts/composers_assistant_v2'))
 import preprocessing_functions as pre
+from midisong import MidiSong
 
 MMM_AVAILABLE = False
 MODEL = None
@@ -27,6 +26,14 @@ try:
     from mmm import Model, Tokenizer, PromptConfig, SamplingEngine, GenerationConfig, Score, generate, ModelConfig
     MMM_AVAILABLE = True
     print("MMM library loaded successfully")
+    
+    # Control MMM logging globally
+    if DEBUG:
+        try:
+            from mmm import set_log_level, LogLevel
+            set_log_level(LogLevel.INFO)
+        except:
+            pass
 except ImportError as e:
     print(f"MMM library not available: {e}")
 
@@ -208,20 +215,18 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
         print(f"  MIDI: {midi_path}")
         print(f"  Measures to generate: {sorted(measures_to_generate)}")
     
-    midi_file = mido.MidiFile(midi_path)
-    output_ticks_per_beat = midi_file.ticks_per_beat
+    # Use MidiSong to read the generated MIDI
+    generated_song = MidiSong.from_midi_file(midi_path)
+    output_ticks_per_beat = generated_song.cpq
     
+    # Get time signature from the song
     output_time_sig_num = 4
     output_time_sig_denom = 4
-    for track in midi_file.tracks:
-        for msg in track:
-            if msg.type == 'time_signature':
-                output_time_sig_num = msg.numerator
-                output_time_sig_denom = msg.denominator
-                break
-        if output_time_sig_num != 4:
-            break
+    if generated_song.time_signatures:
+        output_time_sig_num = generated_song.time_signatures[0].num
+        output_time_sig_denom = generated_song.time_signatures[0].denom
     
+    # Use input timing if provided, otherwise use output timing
     if input_ticks_per_beat and input_time_signature:
         ticks_per_beat = input_ticks_per_beat
         time_sig_num, time_sig_denom = input_time_signature
@@ -230,48 +235,45 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
         time_sig_num = output_time_sig_num
         time_sig_denom = output_time_sig_denom
     
+    # Calculate timing conversion ratio
     timing_ratio = 1.0
     if input_ticks_per_beat and output_ticks_per_beat != input_ticks_per_beat:
         timing_ratio = input_ticks_per_beat / output_ticks_per_beat
         if DEBUG:
             print(f"  Timing conversion: {output_ticks_per_beat} → {input_ticks_per_beat} (ratio {timing_ratio})")
     
+    # Calculate measure length
     beats_per_measure = time_sig_num * (4.0 / time_sig_denom)
     measure_length = int(ticks_per_beat * beats_per_measure)
     
+    if DEBUG:
+        print(f"  Timing: {ticks_per_beat} ticks/beat, {time_sig_num}/{time_sig_denom}")
+        print(f"  Measure length: {measure_length} ticks")
+    
+    # Extract all notes from all tracks
     all_notes = []
-    for track_idx, track in enumerate(midi_file.tracks):
-        current_time = 0
-        active_notes = {}
-        
-        for msg in track:
-            current_time += msg.time
+    for track in generated_song.tracks:
+        for note in track.notes:
+            # Apply timing conversion
+            converted_start = int(note.click * timing_ratio)
+            converted_duration = int((note.end - note.click) * timing_ratio)
             
-            if msg.type == 'note_on' and msg.velocity > 0:
-                active_notes[msg.note] = {'start': current_time, 'velocity': msg.velocity}
-            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                if msg.note in active_notes:
-                    note_start = active_notes[msg.note]['start']
-                    note_duration = current_time - note_start
-                    
-                    converted_start = int(note_start * timing_ratio)
-                    converted_duration = int(note_duration * timing_ratio)
-                    
-                    all_notes.append({
-                        'pitch': msg.note,
-                        'start': converted_start,
-                        'duration': converted_duration,
-                        'velocity': active_notes[msg.note]['velocity']
-                    })
-                    del active_notes[msg.note]
+            all_notes.append({
+                'pitch': note.pitch,
+                'start': converted_start,
+                'duration': converted_duration,
+                'velocity': note.vel
+            })
     
     if DEBUG:
         print(f"  Extracted {len(all_notes)} notes from MIDI")
     
+    # Organize notes by measure
     notes_by_measure = {m: [] for m in measures_to_generate}
     
     for note in all_notes:
         measure_idx = note['start'] // measure_length
+        
         if measure_idx in measures_to_generate:
             position_in_measure = note['start'] - (measure_idx * measure_length)
             notes_by_measure[measure_idx].append({
@@ -281,15 +283,16 @@ def convert_midi_to_ca_format_with_timing(midi_path, project_measures, measures_
                 'velocity': note['velocity']
             })
     
+    # Build CA format output
     measure_to_extra_id = {m: eid for eid, m in extra_id_to_measure.items()}
-    sections = []
     
+    sections = []
     for measure in sorted(measures_to_generate):
         notes = notes_by_measure[measure]
         
         if measure not in measure_to_extra_id:
             if DEBUG:
-                print(f"  Warning: measure {measure} has no extra_id mapping")
+                print(f"  Warning: measure {measure} has no extra_id mapping, skipping")
             continue
         
         extra_id = measure_to_extra_id[measure]
@@ -371,18 +374,24 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
                 print("  No measures to generate")
             return f";<extra_id_{actual_extra_id}>"
         
+        # Create temporary MIDI file
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             temp_midi_path = tmp.name
-        S.dump(filename=temp_midi_path)
+        if DEBUG:
+            temp_midi_path = os.path.join(os.path.dirname(__file__), 'test_in.mid')
         
-        input_midi = mido.MidiFile(temp_midi_path)
-        input_ticks_per_beat = input_midi.ticks_per_beat
+        # Convert MidiSongByMeasure to MidiSong and dump to preserve instruments
+        midi_song = MidiSong.from_MidiSongByMeasure(S, consume_calling_song=False)
+        midi_song.dump(filename=temp_midi_path)
+        
+        # Extract timing information from the converted MidiSong
+        input_ticks_per_beat = midi_song.cpq
         input_time_sig = (4, 4)
-        for track in input_midi.tracks:
-            for msg in track:
-                if msg.type == 'time_signature':
-                    input_time_sig = (msg.numerator, msg.denominator)
-                    break
+        if midi_song.time_signatures:
+            input_time_sig = (midi_song.time_signatures[0].num, midi_song.time_signatures[0].denom)
+        
+        if DEBUG:
+            print(f"  Input timing: {input_ticks_per_beat} ticks/beat, {input_time_sig[0]}/{input_time_sig[1]}")
         
         score_obj = Score(temp_midi_path)
         context_length = model_dim
@@ -421,11 +430,11 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             pad_token_id=0,
             repetition_penalty=1.0,
             temperature=temperature,
-            top_k=50,
             top_p=1.0,
+            top_k=50
         )
         
-        engine = SamplingEngine(gen_cfg, TOKENIZER, seed=sampling_seed, verbose=DEBUG)
+        engine = SamplingEngine(gen_cfg, TOKENIZER, seed=sampling_seed)
         
         if DEBUG:
             print(f"\n=== STARTING GENERATION ===")
@@ -437,12 +446,14 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
             tokenizer=TOKENIZER,
             prompt_config=prompt_cfg,
             sampling_engine=engine,
-            score=score_obj,
-            verbose=bool(DEBUG)
+            score=score_obj
         )
         
         with tempfile.NamedTemporaryFile(suffix='.mid', delete=False) as tmp:
             result_midi_path = tmp.name
+        if DEBUG:
+            result_midi_path = os.path.join(os.path.dirname(__file__), 'test_out.mid')
+        
         generated_score.save(result_midi_path)
         
         if not os.path.exists(result_midi_path):
@@ -470,8 +481,9 @@ def call_nn_infill(s, S_encoded, use_sampling, min_length, enc_no_repeat_ngram_s
         )
         
         try:
-            os.unlink(temp_midi_path)
-            os.unlink(result_midi_path)
+            if not DEBUG:
+                os.unlink(temp_midi_path)
+                os.unlink(result_midi_path)
         except:
             pass
         
