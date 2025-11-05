@@ -28,7 +28,7 @@ try:
     if DEBUG:
         try:
             from mmm import set_log_level, LogLevel
-            set_log_level(LogLevel.INFO)
+            set_log_level(LogLevel.DEBUG)
         except:
             pass
 except ImportError as e:
@@ -107,7 +107,7 @@ def filter_midisongbymeasure_to_range(S, start_measure, end_measure, debug=False
     
     # Filter each track to only include events in the time range
     filtered_tracks = []
-    for track in midi_song.tracks:
+    for idx, track in enumerate(midi_song.tracks):
         # Create new filtered track (is_drum is set automatically by inst property)
         from midisong import Track, Note
         filtered_track = Track(inst=track.inst, name=track.name if hasattr(track, 'name') else "")
@@ -155,7 +155,7 @@ def filter_midisongbymeasure_to_range(S, start_measure, end_measure, debug=False
                 notes_excluded += 1
         
         if debug and (notes_included > 0 or notes_excluded > 0):
-            print(f"  Track {track.inst}: {notes_included} notes included, {notes_excluded} notes excluded")
+            print(f"  Track {idx} (instrument {track.inst}): {notes_included} notes included, {notes_excluded} notes excluded")
         
         # Filter control changes (if any)
         if hasattr(track, 'control_changes') and track.control_changes:
